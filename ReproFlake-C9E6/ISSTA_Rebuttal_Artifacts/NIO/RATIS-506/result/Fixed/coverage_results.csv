@@ -1,0 +1,2 @@
+MethodOnly,CoveredMethods,CoveredLines,CoveragePct,TotalCoveredLines
+testRestartCommitIndex,org.apache.ratis.server.simulation.TestServerRestartWithSimulatedRpc.<init>,org.apache.ratis.server.simulation.TestServerRestartWithSimulatedRpc.java:22,0.0,1
