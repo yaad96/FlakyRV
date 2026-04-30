@@ -1,1 +1,7 @@
 ReproFlake-C9E6/data/
+
+# Python bytecode caches — auto-generated, must never be committed
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

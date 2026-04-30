@@ -42,6 +42,8 @@
 #   9.  generate_llm_summary.py          -> llm_trace_summary.txt
 #   10. assemble_llm_context.py          -> llm_context.txt
 #   11. call_llm.py                      -> llm_response.json
+#   12. apply_fix.py                     -> patches Flaky/ + recompiles bytecode
+#   13. re-run polluter,victim against patched Flaky/ -> verify_after_fix.log
 #
 # Container is left running for iteration.
 # ============================================================
@@ -423,6 +425,79 @@ echo "[step 11] call_llm.py                 -> $STEPS_REL/llm_response.json"
 ( cd "$LLM_SCRIPTS_DIR" && python3 call_llm.py "$RESULT_CONTAINER" )
 
 # ============================================================
+# STEP 12 — Apply the LLM-proposed fix to Flaky/ + recompile bytecode
+#
+# apply_fix.py:
+#   1. tries `git apply` (then `--recount`) on output_a.patch
+#   2. falls back to splicing output_b.fixed_code via the operation/anchor schema
+#   3. host-side javac smoke-tests touched .java files
+#   4. runs `mvn test-compile -pl <module> -am` INSIDE the container so
+#      target/test-classes/ holds the patched bytecode (without this,
+#      step 13's surefire run would silently execute stale .class files
+#      and report a false negative).
+# ============================================================
+echo "[step 12] apply_fix.py                 -> $STEPS_REL/apply_report.json"
+STEP12_OK=1
+( cd "$LLM_SCRIPTS_DIR" && python3 apply_fix.py "$RESULT_CONTAINER" \
+    --docker-container "$CONTAINER" ) || STEP12_OK=0
+
+if (( ! STEP12_OK )); then
+  echo "[step 12] apply_fix.py exited non-zero — LLM patch did not land cleanly."
+  echo "          See $STEPS_REL/apply_report.json for details."
+  echo "          Skipping step 13 (post-fix verification)."
+fi
+
+# ============================================================
+# STEP 13 — Verify the LLM fix actually breaks the OD pair
+#
+# Inverse of the [sanity] block above (which asserts the Flaky variant FAILS
+# pre-fix). After step 12 patched Flaky/ and rebuilt target/test-classes,
+# we re-run the same polluter -> victim sequence against the patched
+# bytecode. Fix is verified IFF Tests>0, Failures=0, Errors=0.
+#
+# Same surefire invocation as step 6c (extension + SUREFIRE_VERSION +
+# runOrder=testorder) so we run on the testorder-capable Surefire fork.
+# TraceMOP attaches harmlessly — we don't read its traces here.
+# ============================================================
+VERDICT="SKIPPED"
+if (( STEP12_OK )); then
+  VERIFY_LOG="$STEPS_OUT_DIR/verify_after_fix.log"
+  echo "[step 13] Re-running '${POLLUTER},${VICTIM}' against patched Flaky/  -> $STEPS_REL/verify_after_fix.log"
+
+  docker exec "$CONTAINER" bash -c "
+    cd /app/work/Flaky
+    export SUREFIRE_VERSION=3.0.0-M8-SNAPSHOT
+    mvn surefire:test \
+      -Dmaven.ext.class.path=$EXT_JAR \
+      -pl $MODULE \
+      -Dtest='$POLLUTER,$VICTIM' \
+      -Dsurefire.runOrder=testorder \
+      $MVNOPTS 2>&1
+  " > "$VERIFY_LOG" 2>&1 || true
+
+  VSUM=$(grep -E "Tests run:[[:space:]]+[0-9]+,[[:space:]]+Failures:[[:space:]]+[0-9]+,[[:space:]]+Errors:[[:space:]]+[0-9]+" \
+            "$VERIFY_LOG" 2>/dev/null | tail -1 || true)
+
+  if [[ -z "$VSUM" ]]; then
+    VERDICT="UNKNOWN"
+    echo "[step 13] WARN: no Surefire summary line in verify log — verdict UNKNOWN."
+    echo "          Inspect $STEPS_REL/verify_after_fix.log for the failure mode."
+  else
+    VTESTS=$(   sed -nE 's/.*Tests run:[[:space:]]+([0-9]+).*/\1/p'   <<<"$VSUM")
+    VFAIL=$(    sed -nE 's/.*Failures:[[:space:]]+([0-9]+).*/\1/p'    <<<"$VSUM")
+    VERR=$(     sed -nE 's/.*Errors:[[:space:]]+([0-9]+).*/\1/p'      <<<"$VSUM")
+    VTESTS=${VTESTS:-0}; VFAIL=${VFAIL:-0}; VERR=${VERR:-0}
+    if (( VTESTS > 0 && VFAIL == 0 && VERR == 0 )); then
+      VERDICT="PASSED"
+    else
+      VERDICT="FAILED"
+    fi
+    echo "[step 13] ${VSUM#*\] }"
+  fi
+  printf '%s\n' "$VERDICT" > "$STEPS_OUT_DIR/verify_after_fix.verdict"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo
@@ -439,12 +514,15 @@ for v in fixed flaky; do
 done
 echo
 echo "Pipeline outputs ($STEPS_REL/):"
-for f in step_8_C_official.txt llm_trace_summary.txt llm_context.txt llm_response.json; do
+for f in step_8_C_official.txt llm_trace_summary.txt llm_context.txt llm_response.json \
+         apply_report.json verify_after_fix.log verify_after_fix.verdict; do
   if [[ -f "$STEPS_OUT_DIR/$f" ]]; then
     sz=$(wc -c < "$STEPS_OUT_DIR/$f" | tr -d ' ')
     printf "  %-26s  %s bytes\n" "$f" "$sz"
   fi
 done
+echo
+echo "Post-fix verdict   : $VERDICT"
 echo
 echo "Container '$CONTAINER' is left running for iteration."
 echo "  Open shell : docker exec -it $CONTAINER bash"

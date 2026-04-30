@@ -129,6 +129,17 @@ def parse_response(raw):
                 method_name = mb_lines[0].strip()
                 mb_rest = mb_lines[1] if len(mb_lines) > 1 else ""
 
+                # @@OPERATION and @@ANCHOR live between @@METHOD and the
+                # ```java fence. Both are optional in the parsed output so
+                # responses produced before the schema was extended still
+                # parse cleanly; the applier should default operation to
+                # 'replace_method' when absent.
+                op_match = re.search(r'@@OPERATION:\s*([^\n]+)', mb_rest)
+                operation = op_match.group(1).strip() if op_match else None
+
+                anchor_match = re.search(r'@@ANCHOR:\s*([^\n]+)', mb_rest)
+                anchor = anchor_match.group(1).strip() if anchor_match else None
+
                 code_match = re.search(r'```java\s*\n(.*?)```', mb_rest, re.DOTALL)
                 code = code_match.group(1).strip() if code_match else None
 
@@ -136,6 +147,8 @@ def parse_response(raw):
                     "file": file_path,
                     "imports": imports_text,
                     "method": method_name,
+                    "operation": operation,
+                    "anchor": anchor,
                     "code": code,
                 })
 
@@ -157,11 +170,16 @@ def _extract_text(response) -> str:
 
 
 def _send(client, system_prompt, messages):
-    """Single API call with our standard model/temperature/max_tokens."""
+    """Single API call with our standard model/max_tokens.
+
+    Note: `temperature` is intentionally omitted. Opus 4.7+ deprecated it
+    (extended-thinking models calibrate internally and reject the parameter
+    with a 400). Older Sonnet accepted it; default behaviour is fine for
+    code-gen tasks. Omitting keeps the call portable across model families.
+    """
     return client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        temperature=0.2,
         system=system_prompt,
         messages=messages,
     )
