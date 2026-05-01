@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# macOS Finder metadata — purely Finder UI state, no code value
+.DS_Store
