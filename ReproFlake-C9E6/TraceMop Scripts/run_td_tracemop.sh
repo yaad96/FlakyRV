@@ -388,7 +388,21 @@ if (( STEP12_OK )); then
     VERR=$(     sed -nE 's/.*Errors:[[:space:]]+([0-9]+).*/\1/p'      <<<"$VSUM")
     VTESTS=${VTESTS:-0}; VFAIL=${VFAIL:-0}; VERR=${VERR:-0}
     if (( VTESTS > 0 && VFAIL == 0 && VERR == 0 )); then
-      VERDICT="PASSED"
+      # Defensive cross-check: even if surefire's summary line claims 0
+      # failures, scan the log for per-test failure markers. Discrepancy
+      # would indicate the summary is unreliable (rare but possible with
+      # surefire forks, custom providers, or accounting bugs). Treat any
+      # discrepancy as FAILED — false-positive PASS is the worst outcome.
+      MARKERS=$(grep -cE '<<< FAILURE!|<<< ERROR!' "$VERIFY_LOG" 2>/dev/null || true)
+      MARKERS=${MARKERS:-0}
+      if (( MARKERS > 0 )); then
+        echo "[step 13] WARNING: summary claims 0 failures but log has $MARKERS per-test"
+        echo "          failure marker(s) (<<< FAILURE! / <<< ERROR!). Summary is unreliable;"
+        echo "          treating as FAILED."
+        VERDICT="FAILED"
+      else
+        VERDICT="PASSED"
+      fi
     fi
     echo "[step 13] ${VSUM#*\] }"
   else

@@ -561,7 +561,22 @@ if (( STEP12_OK )); then
     done <<< "$V_SUMS"
     echo "[step 13] $V_ITERS iterations: Tests=$V_TESTS Failures=$V_FAIL Errors=$V_ERR (failing iters: $V_FAIL_ITERS)"
     if (( V_TESTS > 0 && V_FAIL == 0 && V_ERR == 0 )); then
-      VERDICT="PASSED"
+      # Defensive cross-check: even if every NonDex iteration's summary line
+      # claims 0 failures/errors, scan the log for per-test failure markers.
+      # Discrepancy indicates the summary aggregation is unreliable; treat
+      # as FAILED — false-positive PASS is the worst outcome. For NonDex
+      # multi-iteration runs, ANY iteration's <<< FAILURE!/ERROR! marker
+      # downgrades the whole verdict.
+      MARKERS=$(grep -cE '<<< FAILURE!|<<< ERROR!' "$VERIFY_LOG" 2>/dev/null || true)
+      MARKERS=${MARKERS:-0}
+      if (( MARKERS > 0 )); then
+        echo "[step 13] WARNING: summary claims 0 failures across $V_ITERS iteration(s)"
+        echo "          but log has $MARKERS per-test failure marker(s) (<<< FAILURE! / <<< ERROR!)."
+        echo "          Summary is unreliable; treating as FAILED."
+        VERDICT="FAILED"
+      else
+        VERDICT="PASSED"
+      fi
     fi
   else
     echo "[step 13] No Surefire summary lines in verify log — verdict FAILED."

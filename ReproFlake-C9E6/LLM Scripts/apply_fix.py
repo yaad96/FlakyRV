@@ -39,6 +39,109 @@ DATA_DIR = SCRIPT_DIR.parent / "data"
 
 
 # ---------------------------------------------------------------------------
+# Path resolution (shared by layer 1/2 patch applier AND layer 3 splicer)
+#
+# Why this exists: LLMs sometimes produce patches with paths that omit a
+# Maven module prefix (e.g., `src/test/java/...` instead of
+# `<module>/src/test/java/...`). Without correction, `git apply` either
+# creates an orphan file at the wrong path (silent failure) or the splicer
+# reports `file not found`. Either way, the verdict ends up FAILED with a
+# misleading-or-empty trail.
+#
+# Strategy: SUFFIX match, not basename match. We only resolve a missing
+# path to an existing one when the existing path *ends with* the original.
+# This rules out the dangerous test/main cross-over case
+# (LLM said `src/test/.../Foo.java`; ONLY existing `Foo.java` is at
+# `src/main/.../Foo.java` — different suffix, no rewrite, original passes
+# through and git apply fails honestly).
+# ---------------------------------------------------------------------------
+
+# Directories whose contents we never consider when resolving paths. These
+# are typically build artifacts or VCS internals that may contain copies
+# of source files; matching them would be actively wrong.
+_PATH_FUZZY_EXCLUDED = {
+    ".git", ".gradle", ".idea", ".vscode",
+    "target", "build", "out", "bin", "node_modules", "dist",
+}
+
+
+def _resolve_path(flaky_root: Path, rel_path: str):
+    """Return rel_path verbatim if it points to an existing file under
+    flaky_root. Otherwise search the tree for files whose path ENDS WITH
+    rel_path (suffix match), excluding build-artifact directories.
+    Returns the unique match's relative path, or None if 0 / >1 matches.
+
+    Suffix-match (not bare basename match) is critical: it prevents
+    accidentally rewriting `src/test/.../Foo.java` to `src/main/.../Foo.java`
+    when Foo.java exists in production code under a different sub-tree.
+    """
+    if not rel_path:
+        return None
+    norm = rel_path.replace("\\", "/").lstrip("/")
+    full = flaky_root / norm
+    if full.is_file():
+        return norm
+    basename = Path(norm).name
+    if not basename:
+        return None
+    candidates = []
+    for p in flaky_root.rglob(basename):
+        if not p.is_file():
+            continue
+        if any(part in _PATH_FUZZY_EXCLUDED for part in p.parts):
+            continue
+        try:
+            rel = str(p.relative_to(flaky_root)).replace("\\", "/")
+        except ValueError:
+            continue
+        if rel == norm or rel.endswith("/" + norm):
+            candidates.append(rel)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None  # 0 or >1: don't guess
+
+
+def _rewrite_patch_paths(flaky_root: Path, patch_text: str):
+    """Resolve every target path in the patch via _resolve_path; rewrite the
+    patch text in-place where a rewrite would help. Returns
+    (new_patch_text, mapping) where mapping is {original: resolved} for any
+    rewrites that happened. Empty mapping means the patch is unchanged.
+
+    Rewrites the three header forms compare-traces and git emit:
+      `--- a/<path>`,  `+++ b/<path>`,  `diff --git a/<path> b/<path>`.
+    /dev/null entries are left alone.
+    """
+    targets = _target_files_in_patch(patch_text)
+    mapping = {}
+    for orig in targets:
+        full = flaky_root / orig.replace("\\", "/").lstrip("/")
+        if full.is_file():
+            continue
+        resolved = _resolve_path(flaky_root, orig)
+        if resolved and resolved != orig:
+            mapping[orig] = resolved
+    if not mapping:
+        return patch_text, {}
+    rewritten = patch_text
+    for orig, new in mapping.items():
+        oe = re.escape(orig)
+        ne = new.replace("\\", "\\\\")
+        # `--- a/X` and `+++ b/X`
+        rewritten = re.sub(
+            r'(?m)^([\-\+]{3}\s+[ab]/)' + oe + r'(\s|$)',
+            lambda m: m.group(1) + ne + m.group(2),
+            rewritten,
+        )
+        # `diff --git a/X b/X` (rare for LLM output but handle it)
+        rewritten = re.sub(
+            r'(?m)^(diff --git\s+a/)' + oe + r'(\s+b/)' + oe + r'(\s|$)',
+            lambda m: m.group(1) + ne + m.group(2) + ne + m.group(3),
+            rewritten,
+        )
+    return rewritten, mapping
+
+
+# ---------------------------------------------------------------------------
 # Layer 1 & 2: unified-diff applier (output_a)
 # ---------------------------------------------------------------------------
 
@@ -82,29 +185,111 @@ def _fingerprint(root: Path, rel_paths: list) -> dict:
     return out
 
 
+def _snapshot(root: Path, rel_paths: list) -> dict:
+    """Capture {rel_path: bytes_or_None} for each target file BEFORE an apply
+    attempt, so we can roll back if the attempt produces an invalid result.
+    None means the file did not exist."""
+    snap = {}
+    for rp in rel_paths:
+        full = root / rp
+        snap[rp] = full.read_bytes() if full.is_file() else None
+    return snap
+
+
+def _rollback(root: Path, snap: dict) -> None:
+    """Restore each file to its snapshotted bytes. None means delete (the
+    file did not exist before the apply, so delete it if it now does).
+    All-or-nothing: every snapshotted file is restored, not just the ones
+    that changed. This is critical for multi-file patches where some files
+    landed cleanly but at least one was malformed — leaving the clean ones
+    in a half-applied state would corrupt downstream layers' input."""
+    for rp, content in snap.items():
+        full = root / rp
+        if content is None:
+            if full.is_file():
+                full.unlink()
+        else:
+            full.write_bytes(content)
+
+
+def _is_valid_java_skeleton(text: str, filename: str = "") -> bool:
+    """Quick structural check: does this look like a parseable Java
+    compilation unit?
+
+    Returns True for:
+      - Any non-`.java` file (we don't validate config/data files).
+      - `package-info.java` and `module-info.java` (special files: the
+        former has no class declaration, the latter uses `module`).
+      - Any other `.java` file containing BOTH a `package X.Y.Z;`
+        declaration AND a top-level type declaration (class / interface /
+        enum / @interface / record / module, with optional annotations
+        and modifiers).
+
+    Returns False for `.java` files missing either ingredient — typically
+    because an LLM emitted only a method body without its enclosing class
+    wrapper. Used by apply_patch to detect malformed file-creates and
+    roll back before they pollute downstream stages.
+    """
+    if not filename.endswith(".java"):
+        return True
+    base = filename.rsplit("/", 1)[-1]
+    if base in ("package-info.java", "module-info.java"):
+        return True
+    has_package = bool(re.search(r'^\s*package\s+[\w\.]+\s*;', text, re.M))
+    # Type declaration regex tolerates:
+    #   - leading whitespace
+    #   - any number of @Annotation lines (optionally with arg lists)
+    #   - access/abstract/final/static/sealed/non-sealed modifiers in any
+    #     order (note: `non-sealed` has a hyphen; matched literally)
+    #   - keyword: class | interface | enum | @interface | record | module
+    has_type = bool(re.search(
+        r'^\s*(?:@\w+(?:\([^)]*\))?\s+)*'
+        r'(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*'
+        r'(?:class|interface|enum|@interface|record|module)\s+\w+',
+        text, re.M
+    ))
+    return has_package and has_type
+
+
 def apply_patch(flaky_root: Path, patch_text: str) -> dict:
     """Try `git apply -p1`, then `git apply -p1 --recount`. Return the first
     layer that lands or a failure record.
 
-    A layer is considered successful only if BOTH (a) git's exit code is 0
-    AND (b) every target file's content actually changed on disk.
+    A layer is considered successful only if ALL of:
+      (a) git's exit code is 0,
+      (b) every target file's content actually changed on disk,
+      (c) every newly-CREATED file is structurally valid Java.
 
-    Why the post-apply hash check: when a unified diff has wildly wrong
-    `@@ -L,N +L,N @@` start lines (a common LLM hallucination — e.g. claims
-    line 20 when the method is at line 43), `git apply` outside a git repo
-    will print 'Skipped patch <path>.' to stdout, write no .rej files, and
-    return exit 0. The file is unmodified but the exit code claims success.
-    Trusting that exit code makes the next layer (recompile + verify) read
-    the unchanged flaky source and produces a misleading FAILED verdict
-    that looks like an LLM logic bug when it's actually a silent-skip from
-    the patch applier. Verifying file hashes catches this and forces fall-
-    through to layer 3 (the structured splicer), which uses the LLM's
-    @@METHOD/@@OPERATION schema and is immune to bad line numbers.
+    Three guards against silent-failure modes seen in practice:
+
+    1. Path fuzzy-match (idea 1) — before any git apply, we resolve each
+       target path against the actual file tree using suffix matching.
+       This catches LLM patches that omit a Maven module prefix (e.g.,
+       `src/test/java/...` instead of `<module>/src/test/java/...`).
+
+    2. Hash-based silent-skip detection (idea 3a) — `git apply` outside a
+       git repo will print 'Skipped patch <path>.' and return exit 0 when
+       it can't find the context cleanly (often due to bad line numbers).
+       We compare before/after hashes to catch this.
+
+    3. Malformed-create check (idea 3b) — when the LLM emits a method body
+       without its enclosing class wrapper plus a `@@ -0,0 +1,N @@` (file-
+       create) header, `git apply` happily creates an orphan file with no
+       package/class declaration. We validate any newly-created `.java`
+       file has `package X.Y.Z;` AND a top-level type declaration; if not,
+       we roll back and fall through to the next layer.
+
+    Failure modes that survive these checks should genuinely be patch
+    rejections (not silent-success-then-mysterious-FAILED-verdict).
     """
     if not patch_text or not patch_text.strip():
         return {"layer": None, "ok": False, "reason": "empty patch"}
 
     patch_text = _ensure_trailing_newline(patch_text)
+
+    # IDEA 1: rewrite paths in the patch text BEFORE git apply sees it.
+    # Mapping is empty if every target path already exists.
+    patch_text, path_map = _rewrite_patch_paths(flaky_root, patch_text)
     targets = _target_files_in_patch(patch_text)
 
     layers = [
@@ -123,7 +308,12 @@ def apply_patch(flaky_root: Path, patch_text: str) -> dict:
             last_err = check.stderr.strip()
             continue
 
-        before = _fingerprint(flaky_root, targets)
+        # Snapshot every target's pre-apply state. Used both for the silent-
+        # skip hash comparison and for all-or-nothing rollback if a later
+        # validation step rejects the apply.
+        snap = _snapshot(flaky_root, targets)
+        before = {p: hashlib.sha1(b).hexdigest() if b is not None else None
+                  for p, b in snap.items()}
         apply = subprocess.run(
             cmd,
             input=patch_text, text=True, cwd=flaky_root,
@@ -133,7 +323,7 @@ def apply_patch(flaky_root: Path, patch_text: str) -> dict:
             last_err = apply.stderr.strip()
             continue
 
-        # Verify files actually changed (see docstring for the silent-skip case).
+        # Hash check (silent-skip detection — idea 3a, established earlier).
         after = _fingerprint(flaky_root, targets)
         unchanged = [p for p in targets if before.get(p) == after.get(p)]
         if targets and unchanged:
@@ -143,18 +333,53 @@ def apply_patch(flaky_root: Path, patch_text: str) -> dict:
                 f"target files unchanged (silent skip): {unchanged}. "
                 f"git tail: {log_tail!r}"
             )
+            # Nothing changed → nothing to roll back.
             continue
 
-        return {"layer": name, "ok": True}
+        # Malformed-create check (idea 3b). Newly-created files must look
+        # like real Java compilation units; otherwise the LLM probably gave
+        # us a bare method body without a class wrapper.
+        created = [p for p in targets
+                   if before.get(p) is None and after.get(p) is not None]
+        malformed = []
+        for p in created:
+            try:
+                text = (flaky_root / p).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            if not _is_valid_java_skeleton(text, filename=p):
+                malformed.append(p)
+        if malformed:
+            _rollback(flaky_root, snap)
+            last_err = (
+                f"{name} returned 0 but created malformed Java files (no "
+                f"`package` declaration and/or no top-level class): "
+                f"{malformed}. The LLM likely emitted a method body without "
+                f"its enclosing class wrapper. Rolled back."
+            )
+            continue
 
-    return {"layer": None, "ok": False, "reason": last_err or "all patch layers rejected"}
+        result = {"layer": name, "ok": True}
+        if path_map:
+            result["path_rewritten"] = path_map
+        return result
+
+    out = {"layer": None, "ok": False,
+           "reason": last_err or "all patch layers rejected"}
+    if path_map:
+        out["path_rewritten"] = path_map
+    return out
 
 
 def check_patch(flaky_root: Path, patch_text: str) -> dict:
-    """Dry-run variant: report which layer would land, without modifying files."""
+    """Dry-run variant: report which layer would land, without modifying files.
+    Mirrors apply_patch's path fuzzy-match so dry-run results agree with
+    real-run results — but does NOT replicate the post-apply hash and
+    malformed-create checks (which require an actual apply to evaluate)."""
     if not patch_text:
         return {"layer": None, "ok": False, "reason": "empty patch"}
     patch_text = _ensure_trailing_newline(patch_text)
+    patch_text, path_map = _rewrite_patch_paths(flaky_root, patch_text)
     for name, cmd in [
         ("git apply",           ["git", "apply", "-p1", "--check"]),
         ("git apply --recount", ["git", "apply", "-p1", "--recount", "--check"]),
@@ -162,13 +387,123 @@ def check_patch(flaky_root: Path, patch_text: str) -> dict:
         r = subprocess.run(cmd, input=patch_text, text=True,
                            cwd=flaky_root, capture_output=True)
         if r.returncode == 0:
-            return {"layer": name, "ok": True}
-    return {"layer": None, "ok": False, "reason": "all patch layers rejected"}
+            result = {"layer": name, "ok": True}
+            if path_map:
+                result["path_rewritten"] = path_map
+            return result
+    out = {"layer": None, "ok": False, "reason": "all patch layers rejected"}
+    if path_map:
+        out["path_rewritten"] = path_map
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Layer 3: structured splicer (output_b.fixed_code)
 # ---------------------------------------------------------------------------
+
+# ---- Auto-import inference (idea 2) ---------------------------------------
+# Popular (NOT exhaustive) annotation -> import path lookup. When the splicer
+# inserts code that references @SomeAnnotation that the file doesn't already
+# import, we look it up here and add the right import. Unknown annotations
+# are silently skipped (we never guess at unfamiliar names — better to let
+# compile fail honestly than to invent a wrong import).
+#
+# Format: simple_name -> (junit4_path, junit5_path_or_None).
+# When the file already imports anything from `org.junit.jupiter.*`, we
+# treat it as a JUnit 5 file and prefer the second path (if present);
+# otherwise we use the first.
+_KNOWN_ANNOTATIONS = {
+    # JUnit 4 / 5 lifecycle (JUnit 5 uses different simple names for
+    # @BeforeEach/@AfterEach/@BeforeAll/@AfterAll — those are listed
+    # separately below as their own JUnit-5-only entries).
+    "Test":         ("org.junit.Test",            "org.junit.jupiter.api.Test"),
+    "Before":       ("org.junit.Before",          "org.junit.jupiter.api.BeforeEach"),
+    "After":        ("org.junit.After",           "org.junit.jupiter.api.AfterEach"),
+    "BeforeClass":  ("org.junit.BeforeClass",     "org.junit.jupiter.api.BeforeAll"),
+    "AfterClass":   ("org.junit.AfterClass",      "org.junit.jupiter.api.AfterAll"),
+    "Ignore":       ("org.junit.Ignore",          "org.junit.jupiter.api.Disabled"),
+    "RunWith":      ("org.junit.runner.RunWith",  None),  # JUnit 4 only
+    "Rule":         ("org.junit.Rule",            None),
+    "ClassRule":    ("org.junit.ClassRule",       None),
+    "Parameters":   ("org.junit.runners.Parameterized.Parameters", None),
+
+    # JUnit 5 (Jupiter) — annotations that have no JUnit 4 counterpart.
+    # First slot doubles as the JUnit-5 path so the lookup works regardless
+    # of detected framework (these names ONLY exist in JUnit 5).
+    "BeforeEach":   ("org.junit.jupiter.api.BeforeEach",  None),
+    "AfterEach":    ("org.junit.jupiter.api.AfterEach",   None),
+    "BeforeAll":    ("org.junit.jupiter.api.BeforeAll",   None),
+    "AfterAll":     ("org.junit.jupiter.api.AfterAll",    None),
+    "Disabled":     ("org.junit.jupiter.api.Disabled",    None),
+    "DisplayName":  ("org.junit.jupiter.api.DisplayName", None),
+    "Nested":       ("org.junit.jupiter.api.Nested",      None),
+    "Tag":          ("org.junit.jupiter.api.Tag",         None),
+    "ExtendWith":   ("org.junit.jupiter.api.extension.ExtendWith", None),
+    "ParameterizedTest": ("org.junit.jupiter.params.ParameterizedTest", None),
+    "ValueSource":  ("org.junit.jupiter.params.provider.ValueSource", None),
+    "MethodSource": ("org.junit.jupiter.params.provider.MethodSource", None),
+    "RepeatedTest": ("org.junit.jupiter.api.RepeatedTest", None),
+    "Timeout":      ("org.junit.jupiter.api.Timeout",     None),
+    "TempDir":      ("org.junit.jupiter.api.io.TempDir",  None),
+
+    # Mockito (no framework split needed).
+    "Mock":         ("org.mockito.Mock",          None),
+    "Spy":          ("org.mockito.Spy",           None),
+    "Captor":       ("org.mockito.Captor",        None),
+    "InjectMocks":  ("org.mockito.InjectMocks",   None),
+}
+
+
+def _existing_import_simple_names(src: str) -> set:
+    """{'Before', 'Test', 'JobRegistry', ...} — last-segment of every
+    `import x.y.Z;` (incl. `import static`) currently in the file."""
+    names = set()
+    for m in re.finditer(
+        r'^\s*import\s+(?:static\s+)?[\w\.]+\.(\w+)\s*;', src, re.M
+    ):
+        names.add(m.group(1))
+    return names
+
+
+def _detect_test_framework(src: str) -> str:
+    """Returns 'junit5' if the file imports anything from
+    org.junit.jupiter.*, else 'junit4'. Used to disambiguate annotations
+    whose simple name is shared between JUnit 4 and JUnit 5 (e.g. @Test)."""
+    if re.search(r'^\s*import\s+org\.junit\.jupiter\.', src, re.M):
+        return "junit5"
+    return "junit4"
+
+
+def _infer_imports_for_inserted_code(src: str, inserted_code: str) -> list:
+    """Scan `inserted_code` for @Annotation references that are not already
+    importable from `src`. For each unknown annotation that appears in
+    _KNOWN_ANNOTATIONS, return the corresponding `import X;` line.
+
+    Unknown annotations are silently skipped — we never invent imports
+    for names we don't recognise. Fully-qualified annotations (`@org.x.Y`)
+    capture only `org` (which is not in the table) and are also skipped,
+    correctly avoiding double-imports of names the LLM already qualified."""
+    if not inserted_code:
+        return []
+    have = _existing_import_simple_names(src)
+    framework = _detect_test_framework(src)
+    out, seen = [], set()
+    for m in re.finditer(r'@(\w+)', inserted_code):
+        name = m.group(1)
+        if name in have or name in seen:
+            continue
+        if name not in _KNOWN_ANNOTATIONS:
+            continue
+        junit4, junit5 = _KNOWN_ANNOTATIONS[name]
+        # When there's a JUnit-5 alternative AND the file looks like a
+        # JUnit-5 file, prefer it. Otherwise use the first slot (which is
+        # always the canonical/default path for the annotation).
+        path = junit5 if (framework == "junit5" and junit5) else junit4
+        if path:
+            out.append(f"import {path};")
+            seen.add(name)
+    return out
+# ---- end auto-import inference --------------------------------------------
 
 # Java method signature pattern: leading whitespace, optional INLINE
 # annotations (e.g. `@Test`, `@Test(timeout=1000)`), optional modifiers,
@@ -232,8 +567,14 @@ def add_imports(src: str, new_imports: list) -> str:
     if not to_add:
         return src
 
+    # Use `[ \t]*` (NOT `\s*`) at both ends so we only match the import on
+    # its own line. Greedy `\s*$` would consume trailing newlines AND any
+    # following blank lines, parking insert_at right before the next non-blank
+    # line (typically the class declaration) — which would emit the new
+    # import disconnected from its sibling import block. `[ \t]*` keeps the
+    # match within a single line; insert_at lands cleanly after the `;`.
     last_import = None
-    for m in re.finditer(r'^\s*import\s+[^;]+;\s*$', src, re.M):
+    for m in re.finditer(r'^[ \t]*import\s+[^;]+;[ \t]*$', src, re.M):
         last_import = m
     if last_import:
         insert_at = last_import.end()
@@ -484,19 +825,29 @@ def parse_anchor(anchor: str):
 
 def apply_fixed_code_entry(src: str, entry: dict) -> tuple:
     """Apply ONE fixed_code entry to file content. Returns (new_src, info_dict).
-    Raises ValueError on schema violations or unfindable anchors."""
+    Raises ValueError on schema violations or unfindable anchors.
+
+    Phases (in order):
+      1. Add the entry's explicitly-listed @@IMPORTS to `src`.
+      2. Splice the @@METHOD code per @@OPERATION (replace_method or
+         insert_method with @@ANCHOR). Collected into `result_src`
+         (single return point so the post-step can run uniformly).
+      3. Auto-import inference: scan the inserted code for @Annotation
+         references that the file doesn't already import; add any that
+         match the well-known table (idea 2).
+    """
     info = {
         "file": entry.get("file"),
         "method": entry.get("method"),
         "operation": entry.get("operation") or "replace_method",
     }
 
-    # 1. Add imports
+    # Phase 1: explicit imports from the entry.
     imports = parse_imports_field(entry.get("imports"))
     src = add_imports(src, imports)
     info["imports_added"] = len(imports)
 
-    # 2. Method splice
+    # Phase 2: method splice. Collect into result_src for a single return.
     operation = info["operation"]
     method_name = entry.get("method")
     code = entry.get("code") or ""
@@ -504,6 +855,7 @@ def apply_fixed_code_entry(src: str, entry: dict) -> tuple:
     if not method_name or not code:
         raise ValueError(f"missing method or code field: {entry}")
 
+    result_src = None
     if operation == "replace_method":
         # Pass the LLM's code so find_method can disambiguate when the file
         # has multiple methods with this name (inner-vs-outer, overloads).
@@ -515,9 +867,9 @@ def apply_fixed_code_entry(src: str, entry: dict) -> tuple:
         new_code = reindent_block(code, indent)
         if not new_code.endswith("\n"):
             new_code += "\n"
-        return src[:loc[0]] + new_code + src[loc[1]:], info
+        result_src = src[:loc[0]] + new_code + src[loc[1]:]
 
-    if operation == "insert_method":
+    elif operation == "insert_method":
         if find_method(src, method_name) is not None:
             raise ValueError(
                 f"insert_method: a method named {method_name!r} already exists "
@@ -537,25 +889,42 @@ def apply_fixed_code_entry(src: str, entry: dict) -> tuple:
             indent = get_indent_at(src, loc[0])
             new_code = reindent_block(code, indent)
             if kind == "before_method":
-                return src[:loc[0]] + new_code + "\n\n" + src[loc[0]:], info
+                result_src = src[:loc[0]] + new_code + "\n\n" + src[loc[0]:]
             else:
                 # loc[1] already includes a trailing newline
-                return src[:loc[1]] + "\n" + new_code + "\n" + src[loc[1]:], info
+                result_src = src[:loc[1]] + "\n" + new_code + "\n" + src[loc[1]:]
 
-        if kind == "end_of_class":
+        elif kind == "end_of_class":
             close = find_outer_class_close(src)
             if close is None:
                 raise ValueError(f"end_of_class: outer class brace not found in {info['file']}")
             new_code = reindent_block(code, "    ")
-            return src[:close] + "\n" + new_code + "\n" + src[close:], info
+            result_src = src[:close] + "\n" + new_code + "\n" + src[close:]
 
-    raise ValueError(f"unknown operation: {operation!r}")
+    if result_src is None:
+        raise ValueError(f"unknown operation: {operation!r}")
+
+    # Phase 3: auto-import inference for annotations referenced by the
+    # inserted code. Idempotent w.r.t. phase 1 — anything already imported
+    # (whether by the file originally or just-added in phase 1) is skipped.
+    inferred = _infer_imports_for_inserted_code(result_src, code)
+    if inferred:
+        result_src = add_imports(result_src, inferred)
+        info["imports_inferred"] = inferred
+
+    return result_src, info
 
 
 def apply_fixed_code(flaky_root: Path, entries: list) -> dict:
     """Apply every fixed_code entry. Multiple entries on the same file are
     applied sequentially against the evolving file content (the second
-    entry sees the first entry's edits)."""
+    entry sees the first entry's edits).
+
+    Per-entry path resolution (idea 1): if `entry['file']` doesn't exist
+    under flaky_root, _resolve_path searches the tree for a file whose
+    path ends with the requested suffix. Unique match -> use the resolved
+    path; 0 or >1 matches -> fail this entry honestly with `file not found`.
+    """
     if not entries:
         return {"layer": None, "ok": False, "reason": "no fixed_code entries"}
 
@@ -567,15 +936,24 @@ def apply_fixed_code(flaky_root: Path, entries: list) -> dict:
         if not rel:
             failed.append({"entry": entry, "reason": "missing file field"})
             continue
-        target = flaky_root / rel
-        if not target.exists():
-            failed.append({"entry": entry, "reason": f"file not found: {target}"})
+        # IDEA 1: try to resolve a wrong/short path to a real one.
+        resolved = _resolve_path(flaky_root, rel)
+        if resolved is None:
+            failed.append({
+                "entry": {k: v for k, v in entry.items() if k != "code"},
+                "reason": f"file not found: {rel} (no unique suffix match in flaky tree)",
+            })
             continue
+        if resolved != rel:
+            entry = dict(entry, file=resolved)  # don't mutate caller's dict
+        target = flaky_root / resolved
         try:
             src = target.read_text(encoding="utf-8")
             new_src, info = apply_fixed_code_entry(src, entry)
             target.write_text(new_src, encoding="utf-8")
             info["abs_path"] = str(target)
+            if resolved != rel:
+                info["path_resolved"] = {"original": rel, "resolved": resolved}
             applied.append(info)
         except Exception as e:
             failed.append({
@@ -785,11 +1163,20 @@ def _touched_files_from_patch(flaky_root: Path, patch_text: str) -> list:
 
 
 def _touched_files_from_fixed_code(flaky_root: Path, entries: list) -> list:
+    """Return the absolute file paths the splicer would touch, applying the
+    same path-fuzzy-match the splicer itself uses. Without this, an entry
+    whose `file` field omits a Maven module prefix (the gpt-4o shardingsphere
+    case) would surface here as a non-existent path, and the downstream
+    compile/recompile steps would skip the actual modified file with
+    'no .java files touched' — a misleading message that hides the real
+    apply state from the verdict."""
     files = []
     for e in entries or []:
         rel = e.get("file")
-        if rel:
-            files.append(flaky_root / rel)
+        if not rel:
+            continue
+        resolved = _resolve_path(flaky_root, rel) or rel
+        files.append(flaky_root / resolved)
     return files
 
 
@@ -870,6 +1257,19 @@ def _print_summary(report: dict):
         if "applied" in layer:
             detail = f"{len(layer['applied'])} applied, {len(layer['failed'])} failed"
         print(f"  {verdict} {name:30s} {detail}")
+        # Idea 1 diagnostic: which paths the fuzzy-matcher rewrote.
+        if layer.get("path_rewritten"):
+            for orig, new in layer["path_rewritten"].items():
+                print(f"           + path rewritten: {orig} -> {new}")
+        # Idea 1 diagnostic for the splicer: per-entry path resolutions.
+        for ap in layer.get("applied", []) or []:
+            if ap.get("path_resolved"):
+                pr = ap["path_resolved"]
+                print(f"           + path resolved: {pr['original']} -> {pr['resolved']}")
+            # Idea 2 diagnostic: which imports auto-import inferred.
+            if ap.get("imports_inferred"):
+                imps = ", ".join(ap["imports_inferred"])
+                print(f"           + inferred imports: {imps}")
         if layer.get("failed"):
             for f in layer["failed"]:
                 print(f"           - {f['reason']}")
