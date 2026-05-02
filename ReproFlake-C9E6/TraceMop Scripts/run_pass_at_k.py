@@ -45,6 +45,15 @@ TYPE_TO_SCRIPT = {
 }
 MODEL_API_KEY = {"claude": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
+# Per-run folder name on disk for each model. Was `<container> <model>` (i.e.
+# the model name lowercase, with the container name prefixed redundantly);
+# now just the model name with canonical capitalization. The lowercase
+# `model` token in `MODEL_API_KEY` is still used everywhere else (CLI, env
+# var lookup, summary CSV column); this map only governs directory naming.
+MODEL_DIR_NAME = {"claude": "Claude", "openai": "OpenAI"}
+# Reverse lookup for scanning existing run folders.
+DIR_NAME_TO_MODEL = {v: k for k, v in MODEL_DIR_NAME.items()}
+
 # Per-run sentinel file written ONLY after the archive is fully complete.
 # Skip-detection requires this AND a verdict file in {PASSED, FAILED}.
 SENTINEL = ".run_complete"
@@ -356,17 +365,19 @@ def collect_all_rows_on_disk(runs_root: Path, container: str, test_type: str) ->
     --models openai) would truncate summary.csv to only openai rows, losing
     a prior claude batch's results.
 
-    Folders are matched by the `<container> <model>` prefix, then runs by
-    `run <N>` regex. Returns deterministic order: model alphabetical, run
+    Layout expected:  runs_root/<ModelDirName>/run <N>/...
+    where <ModelDirName> is one of MODEL_DIR_NAME's values (e.g. 'Claude',
+    'OpenAI'). Returns deterministic order: model alphabetical, run
     integer-sorted."""
     rows = []
     if not runs_root.is_dir():
         return rows
-    prefix = f"{container} "
     for model_dir in sorted(runs_root.iterdir()):
-        if not model_dir.is_dir() or not model_dir.name.startswith(prefix):
+        if not model_dir.is_dir():
             continue
-        model = model_dir.name[len(prefix):]
+        model = DIR_NAME_TO_MODEL.get(model_dir.name)
+        if model is None:
+            continue
         run_dirs = []
         for d in model_dir.iterdir():
             if not d.is_dir():
@@ -470,7 +481,11 @@ def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
     md.append("\n## Per-run details\n")
     for r in rows:
         diag = ""
-        d = safe_json(runs_root / f"{container} {r['model']}/run {r['run']}/Steps Output Files/llm_response.json") or {}
+        model_dir_name = MODEL_DIR_NAME.get(r["model"], r["model"])
+        d = safe_json(
+            runs_root / model_dir_name / f"run {r['run']}"
+            / "Steps Output Files" / "llm_response.json"
+        ) or {}
         resp = d.get("response") or {}
         if isinstance(resp, dict):
             # `.get("diagnosis", "")` returns None (not "") when the key exists
@@ -492,8 +507,9 @@ def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
             md.append(f"- **Diagnosis (first 250 chars)**:\n  > {diag.replace(chr(10), ' ')}\n")
         if r["fail_snippet"]:
             md.append(f"- **Fail snippet**: `{r['fail_snippet']}`")
-        # Markdown link with URL-encoded spaces
-        link_dir = f"{container}%20{r['model']}/run%20{r['run']}"
+        # Markdown link — model dir name has no spaces, only the `run N`
+        # segment needs URL-encoded spaces.
+        link_dir = f"{model_dir_name}/run%20{r['run']}"
         md.append(f"- 📁 [pipeline.log]({link_dir}/pipeline.log) · "
                   f"[Steps Output Files/]({link_dir}/Steps%20Output%20Files/) · "
                   f"[Flaky/]({link_dir}/Flaky/)\n")
@@ -548,7 +564,7 @@ def main():
     rows = []
     for model in models:
         for run_n in range(1, args.runs + 1):
-            per_run_dir = runs_root / f"{args.container} {model}" / f"run {run_n}"
+            per_run_dir = runs_root / MODEL_DIR_NAME[model] / f"run {run_n}"
             sentinel = per_run_dir / SENTINEL
             verdict_file = per_run_dir / "Steps Output Files" / "verify_after_fix.verdict"
 
@@ -583,6 +599,12 @@ def main():
             pipeline_log = per_run_dir / "pipeline.log"
             env = os.environ.copy()
             env.pop("KEEP_SOURCE", None)  # don't let user-set KEEP_SOURCE break run independence
+            # Tell the orchestrator to leave its container running between
+            # runs in this loop. The wrapper's per-(model,run) loop reuses
+            # the same container so the ~30s start-up + extension-build
+            # overhead is amortized across runs. Container is finally
+            # removed by the wrapper's end-of-batch cleanup below.
+            env["KEEP_CONTAINER"] = "1"
 
             with open(pipeline_log, "w", encoding="utf-8") as logf:
                 p = subprocess.Popen(
@@ -630,6 +652,15 @@ def main():
     if all_rows:
         write_summary(all_rows, runs_root, args.container, row, args.runs)
 
+    # Append this invocation's per-run rows to the cross-invocation log
+    # BEFORE workspace cleanup. Cleanup can take a long time (rmtree of a
+    # multi-gigabyte data/<container>/ tree, plus a docker container
+    # stop/remove), and there's no reason to make CSV consumers wait for
+    # it. `rows` contains ONLY this invocation's results (not all-time rows
+    # on disk), which is what we want — the file accumulates one batch per
+    # call.
+    append_complete_summary(rows)
+
     # Clean up the scratch workspace at data/<container>/ — it's just the
     # last run's state, redundant with the archived per-run snapshots.
     # Also stop the docker container the per-type script left running
@@ -641,11 +672,6 @@ def main():
         if data_container_dir.is_dir():
             print(f"[wrapper] cleaning workspace {data_container_dir.name}/")
             shutil.rmtree(data_container_dir)
-
-    # Append this invocation's per-run rows to the cross-invocation log.
-    # `rows` contains ONLY this invocation's results (not all-time rows on
-    # disk), which is what we want — the file accumulates one batch per call.
-    append_complete_summary(rows)
 
     print(f"[wrapper] DONE. {sum(1 for r in rows if r['verdict']=='PASSED')}/{len(rows)} runs PASSED.")
 

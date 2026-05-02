@@ -31,19 +31,19 @@
 # Steps performed (output dir = data/<container>/Steps Output Files/):
 #   1.  unzip + apply Fixed.patch
 #   2.  start container with parent data dir mounted
-#   5.  copy tracemop.jar
-#   6a. build javamop-extension inside container
-#   6b. install tracemop.jar into container's local Maven repo
-#   6c. run mvn surefire:test with TraceMOP on Fixed/ then Flaky/
+#   3.  copy tracemop.jar
+#   4a. build javamop-extension inside container
+#   4b. install tracemop.jar into container's local Maven repo
+#   4d. run mvn surefire:test with TraceMOP on Fixed/ then Flaky/
 #       (both with the JavaMOP extension + SUREFIRE_VERSION=3.0.0-M8-SNAPSHOT
 #        + -Dtest=POLLUTER,VICTIM + -Dsurefire.runOrder=testorder)
-#   7.  prepare trace-comparison tooling
-#   8C. compare-traces-official.py       -> step_8_C_official.txt
-#   9.  generate_llm_summary.py          -> llm_trace_summary.txt
-#   10. assemble_llm_context_od.py       -> llm_context.txt
-#   11. call_llm.py (dispatches to claude or openai) -> llm_response.json
-#   12. apply_fix.py                     -> patches Flaky/ + recompiles bytecode
-#   13. re-run polluter,victim against patched Flaky/ -> verify_after_fix.log
+#   5.  prepare trace-comparison tooling
+#   6.  compare-traces-official.py       -> step_8_C_official.txt
+#   7.  generate_llm_summary.py          -> llm_trace_summary.txt
+#   8.  assemble_llm_context_od.py       -> llm_context.txt
+#   9.  call_llm.py (dispatches to claude or openai) -> llm_response.json
+#   10. apply_fix.py                     -> patches Flaky/ + recompiles bytecode
+#   11. re-run polluter,victim against patched Flaky/ -> verify_after_fix.log
 #
 # Container is left running for iteration.
 # ============================================================
@@ -57,14 +57,14 @@ LLM_BACKEND="${2:?Usage: $0 <result_container> <claude|openai>   (second arg pic
 case "$LLM_BACKEND" in
   claude)
     if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-      echo "ERROR: ANTHROPIC_API_KEY is not set. Step 11 (claude backend) requires it."
+      echo "ERROR: ANTHROPIC_API_KEY is not set. Step 9 (claude backend) requires it."
       echo "       export ANTHROPIC_API_KEY=sk-ant-...   then re-run."
       exit 1
     fi
     ;;
   openai)
     if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-      echo "ERROR: OPENAI_API_KEY is not set. Step 11 (openai backend) requires it."
+      echo "ERROR: OPENAI_API_KEY is not set. Step 9 (openai backend) requires it."
       echo "       export OPENAI_API_KEY=sk-...   then re-run."
       exit 1
     fi
@@ -132,6 +132,26 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 CONTAINER="tm_${RESULT_CONTAINER//[^a-zA-Z0-9]/_}"
+
+# Cleanup trap — kills the container on ANY exit (success, error, signal)
+# unless KEEP_CONTAINER=1 is set. Prevents orphan containers from
+# accumulating when a run aborts mid-pipeline (Ctrl+C, mvn hang, etc.) or
+# when a user runs this script standalone and forgets to clean up.
+# `run_pass_at_k.py` sets KEEP_CONTAINER=1 internally so its (model, run)
+# loop can reuse the same container across iterations and only clean up
+# once at the end of the whole batch.
+cleanup_container() {
+  local rc=$?
+  if [[ "${KEEP_CONTAINER:-0}" == "1" ]]; then
+    return $rc
+  fi
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
+    echo "[cleanup] removing container '$CONTAINER' (set KEEP_CONTAINER=1 to skip)"
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  fi
+  return $rc
+}
+trap cleanup_container EXIT
 
 cat <<EOF
 ==========================================
@@ -218,7 +238,7 @@ if (( need_step1 )); then
     patch -p1 -d "$DATA_DIR/Fixed" < "$DATA_DIR/Fixed.patch" >/dev/null
   fi
 else
-  echo "[step 1] Fixed/, Flaky/, Flakym2/ already present — skipping."
+  echo "[step 1c] Fixed/, Flaky/, Flakym2/ already present — skipping."
 fi
 
 for d in Fixed Flaky Flakym2; do
@@ -228,7 +248,7 @@ done
 # ============================================================
 # STEP 2 — Start container with PARENT dir mounted
 # ============================================================
-echo "[step 2] Starting container '$CONTAINER' from image '$IMAGE'"
+echo "[step 2 ] Starting container '$CONTAINER' from image '$IMAGE'"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" \
   --mount type=bind,source="$DATA_DIR",target=/app/work \
@@ -236,16 +256,16 @@ docker run -d --name "$CONTAINER" \
   "$IMAGE" tail -f /dev/null >/dev/null
 
 # ============================================================
-# STEP 5 — Copy tracemop.jar into container
+# STEP 3 — Copy tracemop.jar into container
 # ============================================================
-echo "[step 5] Copying tracemop.jar"
+echo "[step 3 ] Copying tracemop.jar"
 [[ -f "$TRACEMOP_JAR" ]] || { echo "ERROR: $TRACEMOP_JAR not found"; exit 1; }
 docker cp "$TRACEMOP_JAR" "$CONTAINER:/tmp/tracemop.jar"
 
 # ============================================================
-# STEP 6a — Build the Maven extension (one-time per container)
+# STEP 4a — Build the Maven extension (one-time per container)
 # ============================================================
-echo "[step 6a] Building javamop-extension inside container"
+echo "[step 4a] Building javamop-extension inside container"
 [[ -d "$EXT_SRC_DIR" ]] || { echo "ERROR: $EXT_SRC_DIR not found"; exit 1; }
 docker exec "$CONTAINER" mkdir -p /tmp/ext-build
 docker cp "$EXT_SRC_DIR/pom.xml" "$CONTAINER:/tmp/ext-build/pom.xml"
@@ -253,9 +273,9 @@ docker cp "$EXT_SRC_DIR/src"     "$CONTAINER:/tmp/ext-build/src"
 docker exec "$CONTAINER" bash -c "cd /tmp/ext-build && mvn package -DskipTests -q"
 
 # ============================================================
-# STEP 6b — Install tracemop.jar into the container's local Maven repo
+# STEP 4b — Install tracemop.jar into the container's local Maven repo
 # ============================================================
-echo "[step 6b] Installing tracemop.jar into /root/.m2"
+echo "[step 4b] Installing tracemop.jar into /root/.m2"
 docker exec "$CONTAINER" bash -c "mvn install:install-file \
   -Dfile=/tmp/tracemop.jar \
   -DgroupId=javamop-agent \
@@ -264,7 +284,7 @@ docker exec "$CONTAINER" bash -c "mvn install:install-file \
   -Dpackaging=jar -q"
 
 # ============================================================
-# STEP 6c — Run TraceMOP on each codebase variant (polluter → victim order)
+# STEP 4d — Run TraceMOP on each codebase variant (polluter → victim order)
 #
 # Final approach (verified empirically 2026-04-29):
 #
@@ -303,7 +323,7 @@ run_with_tracemop() {
   local variant="$1"   # "Fixed" or "Flaky"
   local label="$2"     # "fixed"  or "flaky"
 
-  echo "[step 6c] /app/work/$variant  ->  /app/work/traces-$label"
+  echo "[step 4d] /app/work/$variant  ->  /app/work/traces-$label"
 
   # Inner bash: outer "..." is double-quoted so host expands $variant, $label,
   # $MODULE, $POLLUTER, $VICTIM, $MVNOPTS, $EXT_JAR.
@@ -361,7 +381,7 @@ run_with_tracemop "Flaky" "flaky"
 # LLM prompt. We parse the last Surefire summary line of the Flaky-run
 # mvn.log and assert the victim test actually ran AND something failed.
 #
-# Step 6c uses the JavaMOP extension + SUREFIRE_VERSION=3.0.0-M8-SNAPSHOT
+# Step 4d uses the JavaMOP extension + SUREFIRE_VERSION=3.0.0-M8-SNAPSHOT
 # + -Dsurefire.runOrder=testorder. 'testorder' sequences the two methods
 # by their order in -Dtest=. If for any reason the agent didn't attach, or
 # testorder isn't actually being honoured by the active Surefire version,
@@ -394,7 +414,7 @@ fi
 if (( FAILURES + ERRORS < 1 )); then
   echo "ERROR: Flaky run had Failures=$FAILURES, Errors=$ERRORS — nothing failed."
   echo
-  echo "       Step 6c uses -Dsurefire.runOrder=testorder (provided by the"
+  echo "       Step 4d uses -Dsurefire.runOrder=testorder (provided by the"
   echo "       custom TestingResearchIllinois Surefire fork) to sequence the"
   echo "       two methods in -Dtest= order. If you're seeing this error,"
   echo "       likely causes:"
@@ -416,12 +436,12 @@ fi
 echo "[sanity ] Flaky run failed as expected (Tests=$TESTS Failures=$FAILURES Errors=$ERRORS)"
 
 # ============================================================
-# STEP 7 — Prepare trace-comparison tooling
+# STEP 5 — Prepare trace-comparison tooling
 # ============================================================
-echo "[step 7 ] Preparing trace-comparison tooling"
+echo "[step 5 ] Preparing trace-comparison tooling"
 
 if [[ ! -f "$COMPARE_TRACES_LOCAL" ]]; then
-  echo "[step 7a] Downloading compare-traces.py from upstream"
+  echo "[step 5a] Downloading compare-traces.py from upstream"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$COMPARE_TRACES_URL" -o "$COMPARE_TRACES_LOCAL"
   elif command -v wget >/dev/null 2>&1; then
@@ -442,35 +462,35 @@ mkdir -p "$STEPS_OUT_DIR"
 STEPS_REL="data/$RESULT_CONTAINER/Steps Output Files"
 
 # ============================================================
-# STEP 8C — Full trace comparison
+# STEP 6 — Full trace comparison
 # (actual=flaky, expected=fixed → "only in actual" = flaky-unique)
 # ============================================================
-echo "[step 8C] compare-traces-official.py  -> $STEPS_REL/step_8_C_official.txt"
+echo "[step 6 ] compare-traces-official.py  -> $STEPS_REL/step_8_C_official.txt"
 docker exec -w /tmp "$CONTAINER" python3 compare-traces-official.py \
   /app/work/traces-flaky \
   /app/work/traces-fixed \
   false > "$STEPS_OUT_DIR/step_8_C_official.txt"
 
 # ============================================================
-# STEP 9 — Generate LLM-ready trace summary
+# STEP 7 — Generate LLM-ready trace summary
 # ============================================================
-echo "[step 9 ] generate_llm_summary.py     -> $STEPS_REL/llm_trace_summary.txt"
+echo "[step 7 ] generate_llm_summary.py     -> $STEPS_REL/llm_trace_summary.txt"
 ( cd "$LLM_SCRIPTS_DIR" && python3 generate_llm_summary.py "$RESULT_CONTAINER" ) >/dev/null
 
 # ============================================================
-# STEP 10 — Assemble LLM context
+# STEP 8 — Assemble LLM context
 # ============================================================
-echo "[step 10] assemble_llm_context_od.py  -> $STEPS_REL/llm_context.txt"
+echo "[step 8 ] assemble_llm_context_od.py  -> $STEPS_REL/llm_context.txt"
 ( cd "$LLM_SCRIPTS_DIR" && python3 assemble_llm_context_od.py "$RESULT_CONTAINER" ) >/dev/null
 
 # ============================================================
-# STEP 11 — Call LLM (mandatory; backend = $LLM_BACKEND)
+# STEP 9 — Call LLM (mandatory; backend = $LLM_BACKEND)
 # ============================================================
-echo "[step 11] call_llm.py ($LLM_BACKEND)  -> $STEPS_REL/llm_response.json"
+echo "[step 9 ] call_llm.py ($LLM_BACKEND)  -> $STEPS_REL/llm_response.json"
 ( cd "$LLM_SCRIPTS_DIR" && python3 call_llm.py "$RESULT_CONTAINER" "$LLM_BACKEND" )
 
 # ============================================================
-# STEP 12 — Apply the LLM-proposed fix to Flaky/ + recompile bytecode
+# STEP 10 — Apply the LLM-proposed fix to Flaky/ + recompile bytecode
 #
 # apply_fix.py:
 #   1. tries `git apply` (then `--recount`) on output_a.patch
@@ -481,19 +501,19 @@ echo "[step 11] call_llm.py ($LLM_BACKEND)  -> $STEPS_REL/llm_response.json"
 #      step 13's surefire run would silently execute stale .class files
 #      and report a false negative).
 # ============================================================
-echo "[step 12] apply_fix.py                 -> $STEPS_REL/apply_report.json"
+echo "[step 10] apply_fix.py                 -> $STEPS_REL/apply_report.json"
 STEP12_OK=1
 ( cd "$LLM_SCRIPTS_DIR" && python3 apply_fix.py "$RESULT_CONTAINER" \
     --docker-container "$CONTAINER" ) || STEP12_OK=0
 
 if (( ! STEP12_OK )); then
-  echo "[step 12] apply_fix.py exited non-zero — LLM patch did not land cleanly."
+  echo "[step 10] apply_fix.py exited non-zero — LLM patch did not land cleanly."
   echo "          See $STEPS_REL/apply_report.json for details."
   echo "          Verdict will be FAILED (no compiled fix to verify)."
 fi
 
 # ============================================================
-# STEP 13 — Verify the LLM fix actually breaks the OD pair
+# STEP 11 — Verify the LLM fix actually breaks the OD pair
 #
 # Strict binary verdict:
 #   PASSED iff step 12 landed AND the patched Flaky/ now produces
@@ -508,8 +528,14 @@ fi
 VERDICT="FAILED"
 if (( STEP12_OK )); then
   VERIFY_LOG="$STEPS_OUT_DIR/verify_after_fix.log"
-  echo "[step 13] Re-running '${POLLUTER},${VICTIM}' against patched Flaky/  -> $STEPS_REL/verify_after_fix.log"
+  echo "[step 11] Re-running '${POLLUTER},${VICTIM}' against patched Flaky/  -> $STEPS_REL/verify_after_fix.log"
 
+  # -Dsurefire.timeout=180 caps the forked test JVM at 3 minutes. Without
+  # it, an LLM-patched test that busy-loops or deadlocks (e.g. a
+  # `while (!cond) {}` retry without bound) hangs the wrapper indefinitely.
+  # 180s is ~3× the longest known-good OD test wall time; large enough not
+  # to cause false-failure on slow tests, small enough that runaway patches
+  # surface within minutes instead of hours.
   docker exec "$CONTAINER" bash -c "
     cd /app/work/Flaky
     export SUREFIRE_VERSION=3.0.0-M8-SNAPSHOT
@@ -518,6 +544,7 @@ if (( STEP12_OK )); then
       -pl $MODULE \
       -Dtest='$POLLUTER,$VICTIM' \
       -Dsurefire.runOrder=testorder \
+      -Dsurefire.timeout=180 \
       $MVNOPTS 2>&1
   " > "$VERIFY_LOG" 2>&1 || true
 
@@ -538,7 +565,7 @@ if (( STEP12_OK )); then
       MARKERS=$(grep -cE '<<< FAILURE!|<<< ERROR!' "$VERIFY_LOG" 2>/dev/null || true)
       MARKERS=${MARKERS:-0}
       if (( MARKERS > 0 )); then
-        echo "[step 13] WARNING: summary claims 0 failures but log has $MARKERS per-test"
+        echo "[step 11] WARNING: summary claims 0 failures but log has $MARKERS per-test"
         echo "          failure marker(s) (<<< FAILURE! / <<< ERROR!). Summary is unreliable;"
         echo "          treating as FAILED."
         VERDICT="FAILED"
@@ -546,9 +573,9 @@ if (( STEP12_OK )); then
         VERDICT="PASSED"
       fi
     fi
-    echo "[step 13] ${VSUM#*\] }"
+    echo "[step 11] ${VSUM#*\] }"
   else
-    echo "[step 13] No Surefire summary line in verify log — verdict FAILED."
+    echo "[step 11] No Surefire summary line in verify log — verdict FAILED."
   fi
 fi
 printf '%s\n' "$VERDICT" > "$STEPS_OUT_DIR/verify_after_fix.verdict"
@@ -589,9 +616,14 @@ echo "Post-fix verdict   : $VERDICT"
 # ============================================================
 
 echo
-echo "Container '$CONTAINER' is left running with its bind mount intact for"
-echo "post-run inspection (Flaky/ now holds the LLM-patched source, target/"
-echo "holds the recompiled bytecode, surefire-reports/ holds the verify run)."
-echo "Remove the container when you're done inspecting:"
-echo "  docker rm -f $CONTAINER"
+if [[ "${KEEP_CONTAINER:-0}" == "1" ]]; then
+  echo "Container '$CONTAINER' left running (KEEP_CONTAINER=1) for inspection:"
+  echo "  Flaky/                 — LLM-patched source"
+  echo "  target/                — recompiled bytecode"
+  echo "  surefire-reports/      — verify run output"
+  echo "Remove when done: docker rm -f $CONTAINER"
+else
+  echo "Container '$CONTAINER' will be removed by the cleanup trap."
+  echo "(Set KEEP_CONTAINER=1 next time to preserve it for inspection.)"
+fi
 echo "=========================================="

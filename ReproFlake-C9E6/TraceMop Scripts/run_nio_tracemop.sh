@@ -55,7 +55,7 @@
 #         NoSuchMethodError: RunOrderParameters.<init>(String, File, Long)
 #      Verified empirically 2026-04-30.
 #
-#   7. Trace pair (step 6c):
+#   7. Trace pair (step 4d):
 #        traces-fixed/  — Fixed/ + wrapper (both invocations pass — clean
 #                          baseline, the test is idempotent thanks to the
 #                          cleanup line in Fixed.patch)
@@ -74,7 +74,7 @@
 #      structural property of trace-diff for NIO, not a pipeline bug —
 #      see probe v5/v6 results in data/quickcheckc1c1/probe/.
 #
-#   8. Step 13 (verify): re-run the SAME wrapper against the patched Flaky/
+#   8. Step 11 (verify): re-run the SAME wrapper against the patched Flaky/
 #      and assert it now passes both invocations (Tests=1, Failures=0,
 #      Errors=0). If the LLM's fix correctly resets the polluted state,
 #      the wrapper's two runs both succeed; otherwise the second run still
@@ -90,25 +90,25 @@
 # Steps performed (output dir = data/<container>/Steps Output Files/):
 #   1.  unzip + apply Fixed.patch
 #   2.  start container with parent data dir mounted
-#   5.  copy tracemop.jar
-#   6a. build javamop-extension inside container
-#   6b. install tracemop.jar into container's local Maven repo
-#   6b.5. generate the NIO wrapper class in BOTH Fixed/ and Flaky/
-#   6c. run mvn test with TraceMOP on Fixed/+wrapper then Flaky/+wrapper
+#   3.  copy tracemop.jar
+#   4a. build javamop-extension inside container
+#   4b. install tracemop.jar into container's local Maven repo
+#   4c. generate the NIO wrapper class in BOTH Fixed/ and Flaky/
+#   4d. run mvn test with TraceMOP on Fixed/+wrapper then Flaky/+wrapper
 #       (both with the JavaMOP extension + SUREFIRE_VERSION=<project's value>)
 #   sanity. Verify Flaky+wrapper failed AND Fixed+wrapper passed.
-#   7.  prepare trace-comparison tooling
-#   8C. compare-traces-official.py traces-flaky traces-fixed -> step_8_C_official.txt
-#   9.  generate_llm_summary.py          -> llm_trace_summary.txt
-#   10. assemble_llm_context_nio.py      -> llm_context.txt   (must exist;
+#   5.  prepare trace-comparison tooling
+#   6.  compare-traces-official.py traces-flaky traces-fixed -> step_8_C_official.txt
+#   7.  generate_llm_summary.py          -> llm_trace_summary.txt
+#   8.  assemble_llm_context_nio.py      -> llm_context.txt   (must exist;
 #                                            mirror assemble_llm_context_id.py
 #                                            but with NIO-specific framing —
 #                                            "this test self-pollutes via static
 #                                            state; identify the field and add
 #                                            cleanup at the end of the method")
-#   11. call_llm.py (dispatches to claude or openai) -> llm_response.json
-#   12. apply_fix.py                     -> patches Flaky/ + recompiles bytecode
-#   13. re-run wrapper against patched Flaky/ -> verify_after_fix.log
+#   9.  call_llm.py (dispatches to claude or openai) -> llm_response.json
+#   10. apply_fix.py                     -> patches Flaky/ + recompiles bytecode
+#   11. re-run wrapper against patched Flaky/ -> verify_after_fix.log
 #
 # Container is left running for iteration.
 # ============================================================
@@ -122,14 +122,14 @@ LLM_BACKEND="${2:?Usage: $0 <result_container> <claude|openai>   (second arg pic
 case "$LLM_BACKEND" in
   claude)
     if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-      echo "ERROR: ANTHROPIC_API_KEY is not set. Step 11 (claude backend) requires it."
+      echo "ERROR: ANTHROPIC_API_KEY is not set. Step 9 (claude backend) requires it."
       echo "       export ANTHROPIC_API_KEY=sk-ant-...   then re-run."
       exit 1
     fi
     ;;
   openai)
     if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-      echo "ERROR: OPENAI_API_KEY is not set. Step 11 (openai backend) requires it."
+      echo "ERROR: OPENAI_API_KEY is not set. Step 9 (openai backend) requires it."
       echo "       export OPENAI_API_KEY=sk-...   then re-run."
       exit 1
     fi
@@ -206,6 +206,22 @@ fi
 
 CONTAINER="tm_${RESULT_CONTAINER//[^a-zA-Z0-9]/_}"
 
+# Cleanup trap — kills the container on ANY exit (success, error, signal)
+# unless KEEP_CONTAINER=1 is set. See run_od_tracemop.sh for the full
+# rationale. `run_pass_at_k.py` sets KEEP_CONTAINER=1 internally.
+cleanup_container() {
+  local rc=$?
+  if [[ "${KEEP_CONTAINER:-0}" == "1" ]]; then
+    return $rc
+  fi
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
+    echo "[cleanup] removing container '$CONTAINER' (set KEEP_CONTAINER=1 to skip)"
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  fi
+  return $rc
+}
+trap cleanup_container EXIT
+
 cat <<EOF
 ==========================================
 result_container : $RESULT_CONTAINER
@@ -239,7 +255,7 @@ EOF
 #                     flaky_info.txt, original .zip.
 # REMOVED (every run, unless KEEP_SOURCE=1): Fixed/, Flaky/, FlakyCodeChange/,
 #                     Flakym2/, result/. Step 1 re-materialises them from
-#                     the zip + patches; step 6b.5 re-generates the wrapper.
+#                     the zip + patches; step 4c re-generates the wrapper.
 # ============================================================
 if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
   if [[ -d "$DATA_DIR/Fixed" || -d "$DATA_DIR/Flaky" || -d "$DATA_DIR/FlakyCodeChange" || -d "$DATA_DIR/Flakym2" || -d "$DATA_DIR/result" ]]; then
@@ -295,7 +311,7 @@ if (( need_step1 )); then
     patch -p1 -d "$DATA_DIR/Fixed" < "$DATA_DIR/Fixed.patch" >/dev/null
   fi
 else
-  echo "[step 1] Fixed/, Flaky/, Flakym2/ already present — skipping."
+  echo "[step 1c] Fixed/, Flaky/, Flakym2/ already present — skipping."
 fi
 
 for d in Fixed Flaky Flakym2; do
@@ -337,7 +353,7 @@ PROP_RX='^\$\{(.+)\}$'
 for _ in 1 2 3; do
   [[ "$SUREFIRE_VER" =~ $PROP_RX ]] || break
   prop_name="${BASH_REMATCH[1]}"
-  echo "[step 1] surefire version is property reference \${$prop_name} — resolving from pom hierarchy"
+  echo "[step 1c] surefire version is property reference \${$prop_name} — resolving from pom hierarchy"
   # Escape dots in the property name so sed treats them literally; Maven
   # property names commonly contain `.` (e.g., `maven-surefire-plugin.version`).
   esc_prop="${prop_name//./\\.}"
@@ -347,25 +363,25 @@ for _ in 1 2 3; do
     | head -n 1 \
     | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
   if [[ -z "$resolved" ]]; then
-    echo "[step 1] WARNING: could not resolve property \${$prop_name} in any pom.xml under Flaky/"
+    echo "[step 1c] WARNING: could not resolve property \${$prop_name} in any pom.xml under Flaky/"
     SUREFIRE_VER=""
     break
   fi
-  echo "[step 1] Resolved \${$prop_name} = $resolved"
+  echo "[step 1c] Resolved \${$prop_name} = $resolved"
   SUREFIRE_VER="$resolved"
 done
 
 if [[ -z "$SUREFIRE_VER" ]]; then
-  echo "[step 1] WARNING: could not parse surefire-plugin version from Flaky/pom.xml — defaulting to 3.0.0-M5"
+  echo "[step 1c] WARNING: could not parse surefire-plugin version from Flaky/pom.xml — defaulting to 3.0.0-M5"
   SUREFIRE_VER="3.0.0-M5"
 else
-  echo "[step 1] Detected surefire version pinned by project: $SUREFIRE_VER"
+  echo "[step 1c] Detected surefire version pinned by project: $SUREFIRE_VER"
 fi
 
 # ============================================================
 # STEP 2 — Start container with PARENT dir mounted
 # ============================================================
-echo "[step 2] Starting container '$CONTAINER' from image '$IMAGE'"
+echo "[step 2 ] Starting container '$CONTAINER' from image '$IMAGE'"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" \
   --mount type=bind,source="$DATA_DIR",target=/app/work \
@@ -373,16 +389,16 @@ docker run -d --name "$CONTAINER" \
   "$IMAGE" tail -f /dev/null >/dev/null
 
 # ============================================================
-# STEP 5 — Copy tracemop.jar into container
+# STEP 3 — Copy tracemop.jar into container
 # ============================================================
-echo "[step 5] Copying tracemop.jar"
+echo "[step 3 ] Copying tracemop.jar"
 [[ -f "$TRACEMOP_JAR" ]] || { echo "ERROR: $TRACEMOP_JAR not found"; exit 1; }
 docker cp "$TRACEMOP_JAR" "$CONTAINER:/tmp/tracemop.jar"
 
 # ============================================================
-# STEP 6a — Build the Maven extension (one-time per container)
+# STEP 4a — Build the Maven extension (one-time per container)
 # ============================================================
-echo "[step 6a] Building javamop-extension inside container"
+echo "[step 4a] Building javamop-extension inside container"
 [[ -d "$EXT_SRC_DIR" ]] || { echo "ERROR: $EXT_SRC_DIR not found"; exit 1; }
 docker exec "$CONTAINER" mkdir -p /tmp/ext-build
 docker cp "$EXT_SRC_DIR/pom.xml" "$CONTAINER:/tmp/ext-build/pom.xml"
@@ -390,9 +406,9 @@ docker cp "$EXT_SRC_DIR/src"     "$CONTAINER:/tmp/ext-build/src"
 docker exec "$CONTAINER" bash -c "cd /tmp/ext-build && mvn package -DskipTests -q"
 
 # ============================================================
-# STEP 6b — Install tracemop.jar into the container's local Maven repo
+# STEP 4b — Install tracemop.jar into the container's local Maven repo
 # ============================================================
-echo "[step 6b] Installing tracemop.jar into /root/.m2"
+echo "[step 4b] Installing tracemop.jar into /root/.m2"
 docker exec "$CONTAINER" bash -c "mvn install:install-file \
   -Dfile=/tmp/tracemop.jar \
   -DgroupId=javamop-agent \
@@ -401,7 +417,7 @@ docker exec "$CONTAINER" bash -c "mvn install:install-file \
   -Dpackaging=jar -q"
 
 # ============================================================
-# STEP 6b.5 — Generate the NIO wrapper class in BOTH Fixed/ and Flaky/
+# STEP 4c — Generate the NIO wrapper class in BOTH Fixed/ and Flaky/
 #
 # The wrapper uses JUnitCore + Request.method(...) to invoke the victim
 # twice in the same JVM, going through the FULL JUnit lifecycle each time
@@ -421,7 +437,7 @@ docker exec "$CONTAINER" bash -c "mvn install:install-file \
 # context, and apply_fix.py must NOT target it — the fix site is the
 # victim's source file, not the wrapper.
 # ============================================================
-echo "[step 6b.5] Generating NIO wrapper class at $WRAPPER_PATH_REL"
+echo "[step 4c] Generating NIO wrapper class at $WRAPPER_PATH_REL"
 
 gen_wrapper() {
   local root="$1"
@@ -456,7 +472,7 @@ gen_wrapper "$DATA_DIR/Fixed"
 gen_wrapper "$DATA_DIR/Flaky"
 
 # ============================================================
-# STEP 6c — Run TraceMOP on each codebase variant with the wrapper
+# STEP 4d — Run TraceMOP on each codebase variant with the wrapper
 #
 # Final approach (verified empirically 2026-04-30 across probes 1-6):
 #
@@ -483,7 +499,7 @@ run_with_tracemop() {
   local variant="$1"   # "Fixed" or "Flaky"
   local label="$2"     # "fixed"  or "flaky"
 
-  echo "[step 6c] /app/work/$variant + wrapper  ->  /app/work/traces-$label"
+  echo "[step 4d] /app/work/$variant + wrapper  ->  /app/work/traces-$label"
 
   docker exec "$CONTAINER" bash -c "
     set -e
@@ -581,12 +597,12 @@ fi
 echo "[sanity ] OK — Fixed passed, Flaky failed (NIO reproduced)."
 
 # ============================================================
-# STEP 7 — Prepare trace-comparison tooling
+# STEP 5 — Prepare trace-comparison tooling
 # ============================================================
-echo "[step 7 ] Preparing trace-comparison tooling"
+echo "[step 5 ] Preparing trace-comparison tooling"
 
 if [[ ! -f "$COMPARE_TRACES_LOCAL" ]]; then
-  echo "[step 7a] Downloading compare-traces.py from upstream"
+  echo "[step 5a] Downloading compare-traces.py from upstream"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$COMPARE_TRACES_URL" -o "$COMPARE_TRACES_LOCAL"
   elif command -v wget >/dev/null 2>&1; then
@@ -606,7 +622,7 @@ mkdir -p "$STEPS_OUT_DIR"
 STEPS_REL="data/$RESULT_CONTAINER/Steps Output Files"
 
 # ============================================================
-# STEP 8C — Full trace comparison
+# STEP 6 — Full trace comparison
 # (actual=flaky, expected=fixed → "only in actual" = flaky-unique)
 #
 # CAVEAT (informational): for NIO victims whose pollution is via a static
@@ -616,20 +632,20 @@ STEPS_REL="data/$RESULT_CONTAINER/Steps Output Files"
 # `static List`, fixed by `.clear()`), the diff is non-empty. See the
 # header comment.
 # ============================================================
-echo "[step 8C] compare-traces-official.py  -> $STEPS_REL/step_8_C_official.txt"
+echo "[step 6 ] compare-traces-official.py  -> $STEPS_REL/step_8_C_official.txt"
 docker exec -w /tmp "$CONTAINER" python3 compare-traces-official.py \
   /app/work/traces-flaky \
   /app/work/traces-fixed \
   false > "$STEPS_OUT_DIR/step_8_C_official.txt"
 
 # ============================================================
-# STEP 9 — Generate LLM-ready trace summary
+# STEP 7 — Generate LLM-ready trace summary
 # ============================================================
-echo "[step 9 ] generate_llm_summary.py     -> $STEPS_REL/llm_trace_summary.txt"
+echo "[step 7 ] generate_llm_summary.py     -> $STEPS_REL/llm_trace_summary.txt"
 ( cd "$LLM_SCRIPTS_DIR" && python3 generate_llm_summary.py "$RESULT_CONTAINER" ) >/dev/null
 
 # ============================================================
-# STEP 10 — Assemble LLM context (NIO-specific)
+# STEP 8 — Assemble LLM context (NIO-specific)
 #
 # This script must exist. Mirror assemble_llm_context_id.py with NIO framing:
 #   - State the NIO definition (test self-pollutes static state across runs).
@@ -641,33 +657,33 @@ echo "[step 9 ] generate_llm_summary.py     -> $STEPS_REL/llm_trace_summary.txt"
 #   - Ask for a fix to the VICTIM's source: a cleanup line at the end of the
 #     test method that resets the polluted static state.
 # ============================================================
-echo "[step 10] assemble_llm_context_nio.py -> $STEPS_REL/llm_context.txt"
+echo "[step 8 ] assemble_llm_context_nio.py -> $STEPS_REL/llm_context.txt"
 ( cd "$LLM_SCRIPTS_DIR" && python3 assemble_llm_context_nio.py "$RESULT_CONTAINER" ) >/dev/null
 
 # ============================================================
-# STEP 11 — Call LLM
+# STEP 9 — Call LLM
 # ============================================================
-echo "[step 11] call_llm.py ($LLM_BACKEND)  -> $STEPS_REL/llm_response.json"
+echo "[step 9 ] call_llm.py ($LLM_BACKEND)  -> $STEPS_REL/llm_response.json"
 ( cd "$LLM_SCRIPTS_DIR" && python3 call_llm.py "$RESULT_CONTAINER" "$LLM_BACKEND" )
 
 # ============================================================
-# STEP 12 — Apply the LLM-proposed fix to Flaky/ + recompile bytecode
+# STEP 10 — Apply the LLM-proposed fix to Flaky/ + recompile bytecode
 # (apply_fix.py handles the patch; recompile is done in-container so step 13
 #  doesn't run stale .class files)
 # ============================================================
-echo "[step 12] apply_fix.py                -> $STEPS_REL/apply_report.json"
+echo "[step 10] apply_fix.py                -> $STEPS_REL/apply_report.json"
 STEP12_OK=1
 ( cd "$LLM_SCRIPTS_DIR" && python3 apply_fix.py "$RESULT_CONTAINER" \
     --docker-container "$CONTAINER" ) || STEP12_OK=0
 
 if (( ! STEP12_OK )); then
-  echo "[step 12] apply_fix.py exited non-zero — LLM patch did not land cleanly."
+  echo "[step 10] apply_fix.py exited non-zero — LLM patch did not land cleanly."
   echo "          See $STEPS_REL/apply_report.json for details."
   echo "          Verdict will be FAILED (no compiled fix to verify)."
 fi
 
 # ============================================================
-# STEP 13 — Verify the LLM fix actually removes the NIO failure
+# STEP 11 — Verify the LLM fix actually removes the NIO failure
 #
 # Strict binary verdict (preserves the cross-script invariant):
 #   PASSED iff step 12 landed AND the patched Flaky/ runs the wrapper with
@@ -680,8 +696,13 @@ fi
 VERDICT="FAILED"
 if (( STEP12_OK )); then
   VERIFY_LOG="$STEPS_OUT_DIR/verify_after_fix.log"
-  echo "[step 13] Re-running wrapper '${WRAPPER_FQCN}#runTwice' against patched Flaky/  -> $STEPS_REL/verify_after_fix.log"
+  echo "[step 11] Re-running wrapper '${WRAPPER_FQCN}#runTwice' against patched Flaky/  -> $STEPS_REL/verify_after_fix.log"
 
+  # -Dsurefire.timeout=180 caps the forked test JVM at 3 minutes. The NIO
+  # wrapper runs the victim twice in one JVM; under normal NIO repro, both
+  # invocations together finish in well under a minute. A 3-minute cap
+  # prevents LLM-patched tests with infinite-loop bugs from hanging the
+  # wrapper indefinitely.
   docker exec "$CONTAINER" bash -c "
     cd /app/work/Flaky
     export SUREFIRE_VERSION=$SUREFIRE_VER
@@ -690,6 +711,7 @@ if (( STEP12_OK )); then
       -pl $MODULE \
       -am \
       -Dtest='${WRAPPER_FQCN}#runTwice' \
+      -Dsurefire.timeout=180 \
       $MVNOPTS 2>&1
   " > "$VERIFY_LOG" 2>&1 || true
 
@@ -703,7 +725,7 @@ if (( STEP12_OK )); then
     MARKERS=$(grep -cE '<<< FAILURE!|<<< ERROR!' "$VERIFY_LOG" 2>/dev/null || true)
     MARKERS=${MARKERS:-0}
     if (( MARKERS > 0 )); then
-      echo "[step 13] WARNING: summary claims 0 failures but log has $MARKERS per-test"
+      echo "[step 11] WARNING: summary claims 0 failures but log has $MARKERS per-test"
       echo "          failure marker(s) (<<< FAILURE! / <<< ERROR!). Summary is unreliable;"
       echo "          treating as FAILED."
       VERDICT="FAILED"
@@ -711,7 +733,7 @@ if (( STEP12_OK )); then
       VERDICT="PASSED"
     fi
   fi
-  echo "[step 13] Tests=$VTESTS Failures=$VFAIL Errors=$VERR"
+  echo "[step 11] Tests=$VTESTS Failures=$VFAIL Errors=$VERR"
 fi
 printf '%s\n' "$VERDICT" > "$STEPS_OUT_DIR/verify_after_fix.verdict"
 
@@ -751,10 +773,14 @@ echo "Post-fix verdict   : $VERDICT"
 # ============================================================
 
 echo
-echo "Container '$CONTAINER' is left running with its bind mount intact for"
-echo "post-run inspection (Flaky/ now holds the LLM-patched source + the"
-echo "auto-generated <Method>NioReproTest wrapper, target/ holds the recompiled"
-echo "bytecode, surefire-reports/ holds the verify run)."
-echo "Remove the container when you're done inspecting:"
-echo "  docker rm -f $CONTAINER"
+if [[ "${KEEP_CONTAINER:-0}" == "1" ]]; then
+  echo "Container '$CONTAINER' left running (KEEP_CONTAINER=1) for inspection:"
+  echo "  Flaky/                 — LLM-patched source + <Method>NioReproTest wrapper"
+  echo "  target/                — recompiled bytecode"
+  echo "  surefire-reports/      — verify run output"
+  echo "Remove when done: docker rm -f $CONTAINER"
+else
+  echo "Container '$CONTAINER' will be removed by the cleanup trap."
+  echo "(Set KEEP_CONTAINER=1 next time to preserve it for inspection.)"
+fi
 echo "=========================================="
