@@ -10,7 +10,12 @@ This is a SMOKE-TEST version: minimal pre-flight, no lock file, no disk
 check, no progress ETA. Verify the core loop works, then add hardening.
 
 Usage:
-  ./run_pass_at_k.py <container> [--models claude,openai] [--runs 3] [--force]
+  ./run_pass_at_k.py <container> [--models claude,openai] [--runs 3] [--skip-existing]
+
+Default: every invocation re-runs the requested (model, run) combinations
+end-to-end, overwriting any prior per-run folder for those combinations.
+Pass --skip-existing to keep per-run folders that already have a complete
+sentinel + PASSED/FAILED verdict (useful for resuming a partial batch).
 """
 
 import argparse
@@ -23,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -42,6 +48,23 @@ MODEL_API_KEY = {"claude": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 # Per-run sentinel file written ONLY after the archive is fully complete.
 # Skip-detection requires this AND a verdict file in {PASSED, FAILED}.
 SENTINEL = ".run_complete"
+
+# Cross-invocation per-run log appended at the end of every run_pass_at_k.py
+# invocation. Lives at the repo root (outside data/) so it survives container
+# cleanups and accumulates across runs. Append-only: header is written on
+# first invocation; subsequent invocations only append rows.
+#
+# Columns are intentionally minimal: container-level metadata that lives in
+# test_config.csv (victim FQN, polluter, module, java, nondex seed, zip,
+# config, url) is NOT duplicated here — join back to test_config.csv on the
+# `container` column. We do keep `test_type` here as a convenience for
+# slicing without a join.
+COMPLETE_SUMMARY_FILE = REPROFLAKE_DIR / "Complete Containers Summary: With RV.csv"
+COMPLETE_SUMMARY_COLS = [
+    "timestamp", "container", "test_type", "model", "run", "verdict",
+    "turns_taken", "input_tokens", "output_tokens", "total_tokens",
+    "llm_seconds",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +284,12 @@ def parse_run(per_run_dir: Path, container, test_type, model, run_n):
         "apply_imports_inferred": ";".join(imports_inferred),
         "recompile_ok": recompile_ok,
         "host_compile_ok": host_compile_ok,
-        "step_13_tests": tests,
-        "step_13_failures": failures,
-        "step_13_errors": errors,
+        # Renamed from step_13_* — the harness reads from `verify_after_fix.log`,
+        # so the column name should match the source artifact, not the
+        # orchestrator's step numbering (which has gaps and could drift).
+        "verify_tests": tests,
+        "verify_failures": failures,
+        "verify_errors": errors,
         "failure_markers": markers,
         "fail_snippet": fail_snippet,
         "elapsed_total_seconds": round(elapsed_total, 1),
@@ -317,7 +343,7 @@ CSV_COLS = [
     "llm_finish_reason", "elapsed_llm_seconds", "elapsed_total_seconds",
     "apply_layer", "apply_path_rewritten", "apply_imports_inferred",
     "recompile_ok", "host_compile_ok",
-    "step_13_tests", "step_13_failures", "step_13_errors", "failure_markers",
+    "verify_tests", "verify_failures", "verify_errors", "failure_markers",
     "fail_snippet",
 ]
 
@@ -352,6 +378,50 @@ def collect_all_rows_on_disk(runs_root: Path, container: str, test_type: str) ->
         for run_n, d in run_dirs:
             rows.append(parse_run(d, container, test_type, model, run_n))
     return rows
+
+
+def append_complete_summary(rows):
+    """Append one row per (model, run) from THIS invocation to the
+    cross-invocation log at COMPLETE_SUMMARY_FILE. Creates the file with a
+    header on first invocation; subsequent invocations only append.
+
+    All rows from a single invocation share one timestamp so they're easy to
+    group later. We log every row in `rows` — including runs that were
+    skipped via --skip-existing — because the user's intent is to track each
+    invocation, and a skipped row still reflects the (container, model, run)
+    state observed by THIS invocation.
+
+    Container-level metadata other than test_type (victim FQN, polluter,
+    module, java, nondex seed, etc.) is NOT duplicated here — join back to
+    test_config.csv on the `container` column to look it up.
+    """
+    if not rows:
+        return
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    file_existed = COMPLETE_SUMMARY_FILE.is_file()
+    with open(COMPLETE_SUMMARY_FILE, "a", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(
+            f, fieldnames=COMPLETE_SUMMARY_COLS,
+            quoting=csv.QUOTE_ALL, extrasaction="ignore",
+        )
+        if not file_existed:
+            w.writeheader()
+        for r in rows:
+            w.writerow({
+                "timestamp": timestamp,
+                "container": r["container"],
+                "test_type": r["test_type"],
+                "model": r["model"],
+                "run": f"run {r['run']}",
+                "verdict": r["verdict"],
+                "turns_taken": r["turns_taken"],
+                "input_tokens": r["input_tokens_total"],
+                "output_tokens": r["output_tokens_total"],
+                "total_tokens": r["total_tokens"],
+                "llm_seconds": round(r["elapsed_llm_seconds"], 1),
+            })
+    print(f"[wrapper] appended {len(rows)} row(s) to "
+          f"{COMPLETE_SUMMARY_FILE.name}")
 
 
 def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
@@ -416,8 +486,8 @@ def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
                   f"imports_inferred=`{r['apply_imports_inferred'] or '—'}`")
         md.append(f"- **Compile**: recompile_ok={r['recompile_ok']} · "
                   f"host_compile_ok={r['host_compile_ok']}")
-        md.append(f"- **Verify**: tests={r['step_13_tests']} failures={r['step_13_failures']} "
-                  f"errors={r['step_13_errors']} · markers={r['failure_markers']}")
+        md.append(f"- **Verify**: tests={r['verify_tests']} failures={r['verify_failures']} "
+                  f"errors={r['verify_errors']} · markers={r['failure_markers']}")
         if diag:
             md.append(f"- **Diagnosis (first 250 chars)**:\n  > {diag.replace(chr(10), ' ')}\n")
         if r["fail_snippet"]:
@@ -442,7 +512,18 @@ def main():
     ap.add_argument("container")
     ap.add_argument("--models", default="claude,openai")
     ap.add_argument("--runs", type=int, default=3)
-    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip per-run folders that already have a complete "
+                         "sentinel + PASSED/FAILED verdict (useful for "
+                         "resuming a partially-completed batch). "
+                         "Default: overwrite — every invocation re-runs all "
+                         "requested (model, run) combinations end-to-end.")
+    # Backwards-compat: --force used to be the explicit overwrite opt-in. It
+    # is now the default behavior, so the flag is a no-op kept only so any
+    # existing scripts that pass it don't break.
+    ap.add_argument("--force", action="store_true",
+                    help="(deprecated; overwrite is now the default — kept "
+                         "for backwards compatibility, has no effect)")
     ap.add_argument("--keep-workspace", action="store_true",
                     help="don't clean up data/<container>/ scratch workspace + "
                          "docker container after the batch (default: clean up; "
@@ -471,11 +552,17 @@ def main():
             sentinel = per_run_dir / SENTINEL
             verdict_file = per_run_dir / "Steps Output Files" / "verify_after_fix.verdict"
 
-            # Skip-detection: complete sentinel + verdict in {PASSED, FAILED}
+            # Skip-detection (opt-in via --skip-existing): when a previous run
+            # has a complete sentinel + verdict in {PASSED, FAILED}, reuse it
+            # and skip re-execution. Default is overwrite — every invocation
+            # of the wrapper re-runs requested (model, run) combinations
+            # end-to-end, which matches the common interactive use case
+            # ("I just changed something, re-run this container fresh").
             verdict_ok = verdict_file.is_file() and verdict_file.read_text(encoding="utf-8").strip() in ("PASSED", "FAILED")
-            if not args.force and sentinel.is_file() and verdict_ok:
+            if args.skip_existing and sentinel.is_file() and verdict_ok:
                 print(f"[wrapper] skipping {model}/run {run_n} (already complete: "
-                      f"{verdict_file.read_text(encoding='utf-8').strip()})")
+                      f"{verdict_file.read_text(encoding='utf-8').strip()}; "
+                      f"--skip-existing is set)")
                 rows.append(parse_run(per_run_dir, args.container, test_type, model, run_n))
                 continue
 
@@ -485,8 +572,9 @@ def main():
                 sys.exit(f"ERROR: {MODEL_API_KEY[model]} env var not set "
                          f"(required to execute {model}/run {run_n})")
 
-            if args.force or per_run_dir.exists():
-                print(f"[wrapper] clearing {per_run_dir} for fresh run")
+            if per_run_dir.exists():
+                print(f"[wrapper] clearing {per_run_dir} for fresh run "
+                      f"(use --skip-existing to keep an already-complete run)")
                 shutil.rmtree(per_run_dir, ignore_errors=True)
             per_run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -553,6 +641,11 @@ def main():
         if data_container_dir.is_dir():
             print(f"[wrapper] cleaning workspace {data_container_dir.name}/")
             shutil.rmtree(data_container_dir)
+
+    # Append this invocation's per-run rows to the cross-invocation log.
+    # `rows` contains ONLY this invocation's results (not all-time rows on
+    # disk), which is what we want — the file accumulates one batch per call.
+    append_complete_summary(rows)
 
     print(f"[wrapper] DONE. {sum(1 for r in rows if r['verdict']=='PASSED')}/{len(rows)} runs PASSED.")
 

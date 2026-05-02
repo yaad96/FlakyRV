@@ -305,6 +305,14 @@ done
 # ----- detect surefire version pinned by the project --------
 # Parse the surefire-plugin <version> from Flaky/pom.xml. If any of the parsing
 # fails or the value is empty, fall back to 3.0.0-M5 (the value in this dataset).
+#
+# Multi-module projects (e.g., shardingsphere/elasticjob) pin surefire via a
+# property reference like <version>${maven-surefire-plugin.version}</version>
+# rather than a literal. The resolution loop below walks the pom hierarchy's
+# <properties> blocks for the named property; without it, the literal
+# "${maven-surefire-plugin.version}" string would be passed to JavaMOPExtension
+# and Maven would try to download `maven-surefire-plugin-${...}.jar`, which
+# fails the build before any tests run (observed on elasticjob294 — May 2026).
 SUREFIRE_VER=$(awk '
   /<plugin>/,/<\/plugin>/ {
     if (/maven-surefire-plugin/) found=1
@@ -318,6 +326,35 @@ SUREFIRE_VER=$(awk '
     if (/<\/plugin>/) found=0
   }
 ' "$DATA_DIR/Flaky/pom.xml" 2>/dev/null)
+
+# Resolve up to 3 levels of ${prop} indirection (e.g., ${a} -> ${b} -> literal).
+# Search every pom.xml under Flaky/ for the property's <prop>VALUE</prop>
+# definition; take the first match. Maven's property inheritance means a single
+# definition anywhere in the hierarchy resolves the reference. Cap at 3 to
+# bound any chain — Maven itself permits longer chains, but in practice flaky
+# project poms don't go deeper.
+PROP_RX='^\$\{(.+)\}$'
+for _ in 1 2 3; do
+  [[ "$SUREFIRE_VER" =~ $PROP_RX ]] || break
+  prop_name="${BASH_REMATCH[1]}"
+  echo "[step 1] surefire version is property reference \${$prop_name} — resolving from pom hierarchy"
+  # Escape dots in the property name so sed treats them literally; Maven
+  # property names commonly contain `.` (e.g., `maven-surefire-plugin.version`).
+  esc_prop="${prop_name//./\\.}"
+  resolved=$(find "$DATA_DIR/Flaky" -maxdepth 8 -name pom.xml -print0 2>/dev/null \
+    | xargs -0 grep -h "<$prop_name>" 2>/dev/null \
+    | sed -nE "s|.*<${esc_prop}>([^<]+)</${esc_prop}>.*|\1|p" \
+    | head -n 1 \
+    | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+  if [[ -z "$resolved" ]]; then
+    echo "[step 1] WARNING: could not resolve property \${$prop_name} in any pom.xml under Flaky/"
+    SUREFIRE_VER=""
+    break
+  fi
+  echo "[step 1] Resolved \${$prop_name} = $resolved"
+  SUREFIRE_VER="$resolved"
+done
+
 if [[ -z "$SUREFIRE_VER" ]]; then
   echo "[step 1] WARNING: could not parse surefire-plugin version from Flaky/pom.xml — defaulting to 3.0.0-M5"
   SUREFIRE_VER="3.0.0-M5"

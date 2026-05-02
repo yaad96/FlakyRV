@@ -1,35 +1,24 @@
 #!/usr/bin/env python3
 """
-assemble_llm_context.py
+assemble_llm_context.py — shared helpers for the per-type assemblers.
 
-Assembles a single structured context file for LLM-based flaky test patch
-generation. Combines RV trace analysis, test source code, failure output,
-and production code into one file optimized for API consumption.
+This module is NOT a runnable assembler on its own. It exposes the pure
+data-extraction helpers that every per-type entry point reuses:
 
-Usage:
-    python assemble_llm_context.py <result_container>
+    assemble_llm_context_od.py   (OD / brittle — has a polluter)
+    assemble_llm_context_td.py   (TD — no polluter)
+    assemble_llm_context_id.py   (ID — NonDex iteration-order shuffle)
+    assemble_llm_context_nio.py  (NIO — non-idempotent self-pollution)
 
-Output:
-    data/<result_container>/llm_context.txt
-
-Design:
-    The output is structured for a two-stage LLM prompting strategy:
-      Stage 1 (diagnosis): LLM reads trace summary + source → identifies root cause
-      Stage 2 (patching):  LLM reads diagnosis + source → generates fix
-
-    The RV trace summary provides the "dynamic runtime evidence" that narrows
-    the search space. Without it, the LLM must do pure static analysis (guess).
-    With it, the LLM knows:
-      - Whether flakiness is confirmed at runtime (not hypothetical)
-      - The category of violation (ThreadSafe, Iterator, Collection, etc.)
-      - The direction (polluter-caused vs non-deterministic)
-      - The magnitude (STRONG/MODERATE/SUBTLE/NO signal)
+Each per-type script imports the helpers below, then assembles its own
+sectioning, TASK framing, and TWO-TURN PROTOCOL inline (the protocol blocks
+are deliberately duplicated per type so a future change to one test type's
+prompt cannot silently shift another type's behavior).
 """
 
 import csv
 import os
 import re
-import sys
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -186,15 +175,284 @@ def extract_java_method(file_path, method_name, target_line=None):
     return "".join(lines[method_start:method_end + 1])
 
 
-def extract_full_class(file_path, max_lines=200):
-    """Read a full class file, capped at max_lines."""
+# ---------------------------------------------------------------------------
+# Class-header (structural) extraction
+# ---------------------------------------------------------------------------
+
+def _strip_java_strings_and_line_comments(line):
+    """Return `line` with string/char literals and `//` line comments
+    replaced by spaces, so brace counting isn't fooled by braces in those
+    contexts. Block comments spanning lines are not handled (rare in test
+    code; accepted imperfection)."""
+    out = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+            break  # rest of line is a line comment
+        if ch == "/" and i + 1 < n and line[i + 1] == "*":
+            j = line.find("*/", i + 2)
+            if j == -1:
+                break  # block comment continues past line — drop the rest
+            out.append(" " * (j + 2 - i))
+            i = j + 2
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and line[j] != '"':
+                j += 2 if line[j] == "\\" and j + 1 < n else 1
+            out.append(" " * (j + 1 - i))
+            i = j + 1
+            continue
+        if ch == "'":
+            j = i + 1
+            while j < n and line[j] != "'":
+                j += 2 if line[j] == "\\" and j + 1 < n else 1
+            out.append(" " * (j + 1 - i))
+            i = j + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+# Detect inner-class declarations on a single class-scope line.
+_INNER_CLASS_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed|strictfp)\s+)*"
+    r"(?:class|interface|enum|record|@interface)\s+\w+"
+)
+
+
+# Java declaration keywords. If any appear on a line that also starts with
+# `@`, the line is an inline-annotated declaration (e.g. `@Test public void
+# foo() {`), NOT a pure annotation line — do not consume it during lookahead.
+# (?<!\.) excludes member references like `Suite.class`, `Foo.interface`,
+# where the keyword is part of a `.class`/etc. reference inside an annotation
+# argument — those are NOT declarations.
+_DECL_KEYWORD_RE = re.compile(
+    r"(?<!\.)\b(public|private|protected|void|static|final|abstract|"
+    r"synchronized|native|default|class|interface|enum|record|byte|short|"
+    r"int|long|float|double|boolean|char)\b"
+)
+
+
+def _skip_annotation_lines(lines, start, scope_depth, depths):
+    """Walk forward from `start` consuming PURE annotation lines (lines whose
+    only content at class scope is one or more `@Foo(...)` expressions).
+    Multi-line `@Foo(\\n...\\n)` annotations are followed by paren-tracking.
+
+    Lines that combine an annotation with a declaration on the same line
+    (e.g. `@Test public void foo() {`) are NOT consumed — they are returned
+    so the caller's method/class-detection branch handles them.
+
+    Returns the index of the first non-pure-annotation line at scope_depth."""
+    i = start
+    n = len(lines)
+    while i < n and depths[i] == scope_depth:
+        analysis = _strip_java_strings_and_line_comments(lines[i]).strip()
+        if not analysis.startswith("@"):
+            return i
+        # Inline-annotation-on-declaration check: if this line also contains a
+        # Java declaration keyword, treat it as a declaration line, not an
+        # annotation line.
+        if _DECL_KEYWORD_RE.search(analysis):
+            return i
+        # Pure-annotation line. Consume it; track parens for multi-line forms.
+        depth_paren = 0
+        for ch in analysis:
+            if ch == "(":
+                depth_paren += 1
+            elif ch == ")":
+                depth_paren -= 1
+        i += 1
+        while i < n and depth_paren > 0 and depths[i] == scope_depth:
+            content = _strip_java_strings_and_line_comments(lines[i])
+            for ch in content:
+                if ch == "(":
+                    depth_paren += 1
+                elif ch == ")":
+                    depth_paren -= 1
+            i += 1
+    return i
+
+
+def _process_class_body(lines, start_idx, scope_depth, depths, include_inner):
+    """Recursive worker for extract_class_header. Walk class-body lines at
+    `scope_depth`, emit class-scope content (fields, comments, annotations,
+    method signatures, inner-class declarations). Skip method bodies. Recurse
+    into inner classes when include_inner is True."""
+    out = []
+    i = start_idx
+    n = len(lines)
+
+    while i < n and depths[i] >= scope_depth:
+        if depths[i] > scope_depth:
+            i += 1
+            continue
+
+        line = lines[i]
+        analysis = _strip_java_strings_and_line_comments(line).strip()
+
+        # Static initializer block — collapse to one line.
+        # Heuristic: starts with `static`, has `{`, no `(` before the `{`.
+        if (
+            analysis.startswith("static")
+            and "{" in analysis
+            and "(" not in analysis.split("{", 1)[0]
+        ):
+            out.append(" " * (4 * scope_depth) + "static { /* ... */ }\n")
+            i += 1
+            while i < n and depths[i] > scope_depth:
+                i += 1
+            continue
+
+        # Look ahead past any annotation lines to find the actual declaration.
+        la = _skip_annotation_lines(lines, i, scope_depth, depths)
+        if la >= n or depths[la] != scope_depth:
+            # No declaration follows on this scope — emit lines verbatim and advance.
+            end = max(la, i + 1)
+            for k in range(i, end):
+                if k < n:
+                    out.append(lines[k])
+            i = end
+            continue
+
+        la_analysis = _strip_java_strings_and_line_comments(lines[la]).strip()
+
+        # Inner-class declaration?
+        if _INNER_CLASS_RE.match(la_analysis):
+            # Find the line containing the opening `{`
+            la2 = la
+            while la2 < n and "{" not in _strip_java_strings_and_line_comments(lines[la2]):
+                la2 += 1
+            if la2 >= n:
+                # Declaration without an opening brace — emit and stop.
+                for k in range(i, la + 1):
+                    out.append(lines[k])
+                i = la + 1
+                continue
+            # Emit i..la2 inclusive (annotations + class header + opening `{`)
+            for k in range(i, la2 + 1):
+                out.append(lines[k])
+            j = la2 + 1
+            if include_inner:
+                # Recursion processes the inner class body at scope_depth+1.
+                # When it returns, j points to the line AFTER the inner class's
+                # closing `}` — recursion has already emitted that `}` itself.
+                inner_text, j = _process_class_body(
+                    lines, j, scope_depth + 1, depths, include_inner
+                )
+                out.append(inner_text)
+            else:
+                out.append(
+                    " " * (4 * (scope_depth + 1))
+                    + "// ... inner class body omitted ...\n"
+                )
+                # Skip body lines (depths > scope_depth). After the loop,
+                # lines[j-1] is the inner class's closing `}` line (if any
+                # body iterations ran), so emit it for symmetry.
+                while j < n and depths[j] > scope_depth:
+                    j += 1
+                if j > la2 + 1 and j - 1 < n and "}" in lines[j - 1]:
+                    out.append(lines[j - 1])
+            i = j
+            continue
+
+        # Method/constructor declaration? (la_analysis contains `(`)
+        if "(" in la_analysis:
+            la2 = la
+            found_brace_at = None
+            found_semi_at = None
+            while la2 < n and depths[la2] == scope_depth:
+                content = _strip_java_strings_and_line_comments(lines[la2])
+                if "{" in content:
+                    found_brace_at = la2
+                    break
+                if ";" in content:
+                    found_semi_at = la2
+                    break
+                la2 += 1
+
+            if found_brace_at is not None:
+                # Emit i..found_brace_at-1 verbatim, then signature with `;`
+                for k in range(i, found_brace_at):
+                    out.append(lines[k])
+                sig = lines[found_brace_at][
+                    : lines[found_brace_at].index("{")
+                ].rstrip()
+                out.append(sig + ";\n")
+                j = found_brace_at + 1
+                while j < n and depths[j] > scope_depth:
+                    j += 1
+                i = j
+                continue
+            if found_semi_at is not None:
+                # Abstract/interface method — emit verbatim
+                for k in range(i, found_semi_at + 1):
+                    out.append(lines[k])
+                i = found_semi_at + 1
+                continue
+            # Couldn't find brace/semi — emit collected lines and advance.
+            for k in range(i, la2):
+                out.append(lines[k])
+            i = la2
+            continue
+
+        # Default: field declaration, plain comment, blank line — emit verbatim.
+        out.append(line)
+        i += 1
+
+    return "".join(out), i
+
+
+def extract_class_header(file_path, include_inner_classes=False, max_lines=400):
+    """Return the structural header of a Java file: package + imports +
+    class signature(s) + field declarations + method signatures (no method
+    bodies). Inner classes are processed structurally when
+    include_inner_classes is True; otherwise they appear as a declaration line
+    plus a `// ... inner class body omitted ...` placeholder.
+
+    Returns None if file_path is missing.
+    Caps output at max_lines, with a trailing truncation marker.
+    """
     if not file_path or not os.path.isfile(file_path):
         return None
+
     with open(file_path, encoding="utf-8") as f:
         lines = f.readlines()
-    if len(lines) > max_lines:
-        return "".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines truncated)\n"
-    return "".join(lines)
+
+    # Compute brace depth at the start of each line.
+    depths = []
+    d = 0
+    for line in lines:
+        depths.append(d)
+        for ch in _strip_java_strings_and_line_comments(line):
+            if ch == "{":
+                d += 1
+            elif ch == "}":
+                d -= 1
+
+    n = len(lines)
+    out = []
+    i = 0
+    while i < n:
+        # Pre-class content (depth 0): emit verbatim
+        while i < n and depths[i] == 0:
+            out.append(lines[i])
+            i += 1
+        if i < n:
+            body, new_i = _process_class_body(lines, i, 1, depths, include_inner_classes)
+            out.append(body)
+            i = new_i
+
+    text = "".join(out)
+    text_lines = text.splitlines(keepends=True)
+    if len(text_lines) > max_lines:
+        text = "".join(text_lines[:max_lines]) + (
+            f"... ({len(text_lines) - max_lines} more header lines truncated)\n"
+        )
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -332,514 +590,3 @@ def derive_project_package(fqn, depth=3):
     return class_part
 
 
-# ---------------------------------------------------------------------------
-# Main assembly
-# ---------------------------------------------------------------------------
-
-def assemble_context(result_container):
-    base = os.path.join(DATA_DIR, result_container)
-    csv_row = load_csv_row(result_container)
-
-    if not csv_row:
-        print(f"ERROR: {result_container} not found in test_config.csv", file=sys.stderr)
-        sys.exit(1)
-
-    # The CSV has separate 'result_container' and 'zip' columns.
-    # Multiple rows can share the same zip (same codebase) but have different
-    # result_containers (different polluter/victim pairs). Source code and logs
-    # live under the zip directory via Docker bind mount, while analysis files
-    # (step_8_C_official.txt, llm_trace_summary.txt) live under result_container.
-    zip_name = csv_row.get("zip", "").strip()
-    zip_base = os.path.join(DATA_DIR, zip_name) if zip_name and zip_name != result_container else None
-
-    # Determine the source base: prefer result_container, fall back to zip
-    if os.path.isdir(os.path.join(base, "Flaky", "src")):
-        source_base = base
-    elif zip_base and os.path.isdir(os.path.join(zip_base, "Flaky", "src")):
-        source_base = zip_base
-    else:
-        source_base = base  # fallback, may produce "not found" messages
-
-    test_type = csv_row.get("test_type", "unknown").strip().lower()
-    polluter_fqn = csv_row.get("polluter/state setter", "").strip()
-    victim_fqn = csv_row.get("flaky_test", "").strip()
-    module = csv_row.get("module", ".").strip()
-    java_ver = csv_row.get("java", "").strip()
-    has_polluter = test_type in ("od", "britle") and polluter_fqn != ""
-
-    type_labels = {
-        "od": "OD (order-dependent)",
-        "id": "ID (implementation-dependent / non-deterministic)",
-        "td": "TD (test-dependency)",
-        "britle": "BRITTLE (fragile test interaction)",
-        "unclassified": "UNCLASSIFIED",
-    }
-
-    # --- Section A: Metadata ---
-    out = []
-    out.append("=" * 60)
-    out.append("LLM CONTEXT FOR FLAKY TEST PATCH GENERATION")
-    out.append("=" * 60)
-    out.append("")
-    out.append("=== TEST METADATA ===")
-    out.append(f"Test type:      {type_labels.get(test_type, test_type.upper())}")
-    if has_polluter:
-        out.append(f"Polluter:       {polluter_fqn}")
-    out.append(f"Victim:         {victim_fqn}")
-    out.append(f"Module:         {module}")
-    out.append(f"Java:           {java_ver}")
-    out.append("")
-
-    # --- Section B: Source code ---
-    # Source code first — LLM needs to read the code before seeing the evidence
-
-    # Polluter source code (OD/brittle only)
-    if has_polluter and polluter_fqn:
-        rel_path, method_name = fqn_to_path(polluter_fqn)
-        source_file = find_source_file(source_base, module, rel_path)
-
-        out.append("=== POLLUTER SOURCE CODE ===")
-        if source_file and method_name:
-            method_src = extract_java_method(source_file, method_name)
-            if method_src:
-                out.append(f"File: {os.path.basename(source_file)}")
-                out.append(f"Method: {method_name}")
-                out.append("")
-                out.append(method_src)
-            else:
-                out.append(f"(Could not extract method {method_name} — full class below)")
-                out.append("")
-                out.append(extract_full_class(source_file) or "(file not readable)")
-        elif source_file:
-            out.append(f"File: {os.path.basename(source_file)}")
-            out.append("")
-            out.append(extract_full_class(source_file) or "(file not readable)")
-        else:
-            out.append(f"(Source file not found for {polluter_fqn})")
-        out.append("")
-
-    # Victim source code
-    rel_path, method_name = fqn_to_path(victim_fqn)
-    source_file = find_source_file(source_base, module, rel_path)
-
-    out.append("=== VICTIM SOURCE CODE ===")
-    if source_file:
-        if has_polluter and method_name:
-            method_src = extract_java_method(source_file, method_name)
-            if method_src:
-                out.append(f"File: {os.path.basename(source_file)}")
-                out.append(f"Method: {method_name}")
-                out.append("")
-                out.append(method_src)
-            else:
-                out.append(f"(Could not extract method {method_name} — full class below)")
-                out.append("")
-                out.append(extract_full_class(source_file) or "(file not readable)")
-        else:
-            out.append(f"File: {os.path.basename(source_file)}")
-            if method_name:
-                out.append(f"Failing method: {method_name}")
-            out.append("")
-            out.append(extract_full_class(source_file) or "(file not readable)")
-    else:
-        out.append(f"(Source file not found for {victim_fqn})")
-    out.append("")
-
-    # Production code from stack trace
-    # (extracted later after failure_text is available, appended below)
-
-    # --- Section C: Evidence (failure + traces, placed near the task for recency) ---
-
-    # Failure output. The orchestrators write the failing-run mvn log to:
-    #   traces-flakycc/mvn.log  (TD: FlakyCodeChange variant)
-    #   traces-flaky/mvn.log    (OD: Flaky/ source with polluter→victim order)
-    # Probe both, then fall back to traces-fixed/mvn.log as a last resort.
-    failure_text = "(no log file found)"
-    for candidate in ("traces-flakycc", "traces-flaky", "traces-fixed"):
-        text = extract_failure_from_log(
-            os.path.join(source_base, candidate, "mvn.log")
-        )
-        if not text.startswith("("):
-            failure_text = text
-            break
-    out.append("=== FAILURE OUTPUT ===")
-    out.append("(The actual error when running polluter → victim)" if has_polluter
-               else "(The actual error during the failing execution)")
-    out.append("")
-    out.append(failure_text)
-    out.append("")
-
-    # Production code referenced in stack trace
-    project_pkg = derive_project_package(victim_fqn)
-    prod_code = extract_production_code_from_stacktrace(
-        failure_text, source_base, module, project_pkg
-    )
-
-    if prod_code:
-        out.append("=== PRODUCTION CODE REFERENCED IN STACK TRACE ===")
-        out.append("(Methods from the project's main source that appear in the failure)")
-        out.append("")
-        for entry in prod_code:
-            out.append(f"--- {entry['class']}.{entry['method']}() [{entry['file']}:{entry['line']}] ---")
-            out.append(entry["source"])
-            out.append("")
-
-    # [PRUNED] TEST RESULTS section removed: with the deterministic
-    # Fixed-vs-FlakyCodeChange pair, pass/fail counts collapse to 1/1 — the
-    # same boolean is implicit in the failure stack trace.
-
-    # RV Trace Analysis — placed last before task so it's freshest in context
-    trace_summary = read_file_safe(os.path.join(base, "Steps Output Files", "llm_trace_summary.txt"))
-    if trace_summary.strip():
-        out.append("=== RV TRACE ANALYSIS ===")
-        out.append("(Generated by TraceMOP runtime verification. These traces capture")
-        out.append("behavioral differences between the flaky run and clean run at the")
-        out.append("JVM level. Spec names identify which API contracts are violated.)")
-        out.append("")
-        for line in trace_summary.strip().splitlines():
-            out.append(line)
-        out.append("")
-    else:
-        out.append("=== RV TRACE ANALYSIS ===")
-        out.append("(llm_trace_summary.txt not found — run generate_llm_summary.py first)")
-        out.append("")
-
-    # --- Section D: Task instruction for the LLM ---
-    out.append("=== TASK ===")
-
-    # Goal framing: test-driven ("make this test pass")
-    if has_polluter:
-        out.append(f"GOAL: Make the victim test ({victim_fqn.split('#')[-1]}) pass")
-        out.append(f"when run immediately after the polluter ({polluter_fqn.split('#')[-1]}).")
-    elif test_type == "td":
-        out.append(f"GOAL: Make the test ({victim_fqn.split('#')[-1]}) pass deterministically.")
-        out.append("The test currently fails on the codebase shown above. Identify the root")
-        out.append("cause from the failure stack trace and the RV trace evidence, and produce")
-        out.append("the smallest patch that makes the test pass on every execution.")
-    else:
-        out.append(f"GOAL: Make the test ({victim_fqn.split('#')[-1]}) pass deterministically")
-        out.append("on every execution, regardless of timing or platform.")
-    out.append("")
-
-    # Fix strategy hints
-    if has_polluter:
-        out.append("Possible fix categories (pick whichever fits the evidence):")
-        out.append("  1. Add cleanup in the polluter (@After/@AfterEach) to restore shared state")
-        out.append("  2. Add setup in the victim (@Before/@BeforeEach) to initialize required state")
-        out.append("  3. Add a defensive state check in the production code")
-    elif test_type == "td":
-        out.append("Possible fix categories (pick whichever fits the evidence — do NOT")
-        out.append("force a strategy if the evidence does not point at it):")
-        out.append("  1. Timing — adjust @Test(timeout = ...) if the test exceeds a too-tight bound,")
-        out.append("     or replace short ad-hoc waits with proper synchronization.")
-        out.append("  2. Asynchrony — add explicit waits / retries for asynchronous prerequisites")
-        out.append("     (e.g., wait for state to converge before asserting on it).")
-        out.append("  3. Determinism — replace unstable orderings (e.g., HashMap iteration) or")
-        out.append("     non-deterministic API calls with stable / deterministic alternatives.")
-        out.append("  4. Implicit shared state — initialize state the test implicitly depends on")
-        out.append("     in @Before/@BeforeEach instead of inheriting it from prior runs.")
-    else:
-        out.append("Possible fix categories (pick whichever fits the evidence):")
-        out.append("  1. Replace non-deterministic calls with deterministic alternatives")
-        out.append("  2. Add proper synchronization or waiting mechanisms")
-        out.append("  3. Mock or control the source of non-determinism")
-        out.append("  4. Fix incorrect assumptions about execution order")
-    out.append("")
-
-    # Minimal change constraint
-    out.append("CONSTRAINTS:")
-    out.append("- Make the SMALLEST possible change that fixes the flakiness.")
-    out.append("- Do NOT rename variables, methods, or classes.")
-    out.append("- Do NOT refactor or restructure unrelated code.")
-    out.append("- Do NOT add logging, print statements, or debug output.")
-    out.append("- Do NOT change test assertions, expected values, or test logic")
-    out.append("  unless the assertion itself is the root cause.")
-    out.append("- Do NOT modify method signatures or class hierarchy.")
-    out.append("- Preserve the original code style (indentation, naming conventions).")
-    out.append("")
-
-    # ---- Two-turn protocol: artifact request first, fix second ----
-    # The LLM must first run a mandatory sufficiency checklist. If any checklist
-    # item is true, it must request artifacts and wait for TURN 2 before patching.
-    out.append("=== TWO-TURN PROTOCOL (read before responding) ===")
-    out.append("You will work in up to TWO turns.")
-    out.append("")
-    out.append("TURN 1 (this message). Before writing any diagnosis or patch, decide")
-    out.append("whether the context above is enough to produce a robust, correct,")
-    out.append("buildable patch that does not introduce regressions.")
-    out.append("")
-    out.append("Mandatory artifact-request checklist:")
-    out.append("  If ANY item below is true, you MUST request artifacts. Do not emit")
-    out.append("  NONE and do not produce OUTPUT 0/A/B in TURN 1.")
-    out.append("  [1] The failure stack trace or your suspected root cause touches a")
-    out.append("      method, constructor, field initializer, or class body whose source")
-    out.append("      is NOT shown in the context above.")
-    out.append("  [2] Your draft fix would touch, reset, or depend on a static singleton,")
-    out.append("      factory, cache, registry, global logger, system property, or any")
-    out.append("      other shared mutable global state.")
-    out.append("  [3] Your draft fix would call setX(null), clear(), reset(), restore a")
-    out.append("      default value, or use any other 'reset to default' pattern whose")
-    out.append("      production-side behavior is not fully shown.")
-    out.append("  [4] You would need to write phrases like 'I assume', 'I guess',")
-    out.append("      'I don't know', 'I don't have the full file', 'line N is a guess',")
-    out.append("      or 'not sure whether this import exists'.")
-    out.append("  [5] Your draft fix would add a third-party import or depend on a")
-    out.append("      library API whose dependency is not confirmed in the shown context")
-    out.append("      (for example ReflectionUtils, Awaitility, Mockito utilities, or")
-    out.append("      framework-specific test helpers).")
-    out.append("")
-    out.append("After applying the checklist, pick ONE path:")
-    out.append("")
-    out.append("  (a) Checklist passes: NO additional artifacts needed. Begin your")
-    out.append("      response with the single line:")
-    out.append("        <ARTIFACTS_REQUESTED>NONE - confirmed checklist above passes</ARTIFACTS_REQUESTED>")
-    out.append("      Then immediately proceed to OUTPUT 0 / OUTPUT A / OUTPUT B per")
-    out.append("      the spec further below.")
-    out.append("")
-    out.append("  (b) Checklist fails: YOU NEED additional artifacts. Begin your response")
-    out.append("      with an <ARTIFACTS_REQUESTED> block listing up to 5 artifacts,")
-    out.append("      then STOP — do NOT produce OUTPUT 0/A/B in this turn. We will")
-    out.append("      fulfil your request and ask for OUTPUT 0/A/B in TURN 2.")
-    out.append("")
-    out.append("Format for option (b) — use this EXACT XML schema:")
-    out.append("  <ARTIFACTS_REQUESTED>")
-    out.append('    <artifact type="<TYPE>" target="<TARGET>" reason="<short reason>"/>')
-    out.append("    ... up to 5 ...")
-    out.append("  </ARTIFACTS_REQUESTED>")
-    out.append("")
-    out.append("STRICT SCHEMA RULES (the response is parsed by a regex):")
-    out.append('  - The element tag MUST be the literal word `artifact` (lowercase).')
-    out.append('  - The type goes in the `type=` attribute, NOT as the tag name.')
-    out.append("  - Correct example:")
-    out.append('      <artifact type="METHOD" target="com.foo.Bar#baz" reason="..."/>')
-    out.append("  - Common drift mistakes (the parser is tolerant but please do not make these):")
-    out.append('      <METHOD target="com.foo.Bar#baz" reason="..."/>          (type-as-tag-name)')
-    out.append('      <Artifact Type="METHOD" Target="..." />                  (capitalized attrs)')
-    out.append("")
-    out.append("Closed enum of supported types and target syntaxes:")
-    out.append("  IMPORTS_OF      target = relative path to a .java file")
-    out.append("                  (e.g. 'src/test/java/com/example/FooTest.java'")
-    out.append("                  or 'bookkeeper-server/src/test/java/.../FooTest.java')")
-    out.append("                  -> we return the file's package + import block.")
-    out.append("  FULL_FILE       target = relative path to a .java file (capped at 800 lines)")
-    out.append("                  -> we return the entire file content.")
-    out.append("  METHOD          target = '<package.Class>#<methodName>'")
-    out.append("                  -> we return the named method's annotations + signature + body")
-    out.append("                  (searches src/main/java first, then src/test/java).")
-    out.append("  SPEC_DEFINITION target = RV spec name (e.g. 'Map_UnsafeIterator')")
-    out.append("                  -> we return the spec's .mop definition (formal rule).")
-    out.append("  POM_DEPENDENCY  target = '<groupId>:<artifactId>'")
-    out.append("                  -> we return matching <dependency> blocks from any pom.xml")
-    out.append("                  in the project (so you can confirm a library is on classpath).")
-    out.append("")
-    out.append("Guidance for choosing artifacts:")
-    out.append("  - If you're uncertain about line numbers, imports, or the precise")
-    out.append("    declaration order in a file, ask for IMPORTS_OF or FULL_FILE.")
-    out.append("  - If the failing path goes through production code that is NOT in")
-    out.append("    the failure stack trace (e.g. logger internals, singleton getInstance,")
-    out.append("    null-safety checks), ask for METHOD on those production methods.")
-    out.append("    A naïve fix that doesn't see the production-side dereference can")
-    out.append("    introduce a regression NPE.")
-    out.append("  - If you'd like to suggest using a library API (e.g. ReflectionUtils,")
-    out.append("    Awaitility), ask for POM_DEPENDENCY first to confirm it's available.")
-    out.append("  - Prefer 1-3 high-leverage artifacts over 5 marginal ones.")
-    out.append("  - Write a one-sentence reason for each — it helps you commit and")
-    out.append("    helps the human auditor.")
-    out.append("")
-    out.append("End of TWO-TURN PROTOCOL. Below is the OUTPUT spec used either in")
-    out.append("TURN 1 (path (a)) or TURN 2 (after artifacts are provided).")
-    out.append("")
-
-    # Three outputs: diagnosis (CoT) + patch (diff) + developer guide (structured).
-    # Output B is REQUIRED — both as redundancy against a malformed Output A diff
-    # and as a structured form for corpus extraction / human review.
-    out.append("Provide THREE outputs. Your response will be parsed by an automated")
-    out.append("script — use the exact headers and fencing shown below. Do not")
-    out.append("paraphrase, reorder, or omit any of them.")
-    out.append("")
-    out.append("CRITICAL DISCIPLINE — read carefully:")
-    out.append("  - Complete ALL reasoning, exploration, and self-correction inside")
-    out.append("    OUTPUT 0. By the time you write OUTPUT A, the patch shown there is")
-    out.append("    your FINAL answer.")
-    out.append("  - Do NOT write phrases like 'wait, let me redo this', 'actually,",)
-    out.append("    let me reconsider', 'on second thought', or any second-attempt")
-    out.append("    diff in OUTPUT A or OUTPUT B. If mid-writing you realise the patch")
-    out.append("    is wrong, STOP, return to OUTPUT 0 to extend the reasoning, and")
-    out.append("    only then start OUTPUT A clean.")
-    out.append("  - OUTPUT A must contain EXACTLY ONE ```diff fenced block. Multiple")
-    out.append("    diff blocks break the parser — the parser uses the first one.")
-    out.append("  - OUTPUT B must contain EXACTLY ONE ### ROOT_CAUSE, ONE")
-    out.append("    ### FIX_DESCRIPTION, and ONE ### FIXED_CODE. Each modified file")
-    out.append("    appears once; each modified method appears once.")
-    out.append("")
-
-    # OUTPUT 0 — Diagnosis (Chain of Thought) + draft + self-verify
-    out.append("OUTPUT 0 — DIAGNOSIS:")
-    out.append("Reason step-by-step through ALL of the following before writing")
-    out.append("any patch. The OUTPUT 0 section is where ALL exploration happens.")
-    if has_polluter:
-        out.append("  1. What shared state does the polluter modify or corrupt?")
-        out.append("  2. What state does the victim assume or expect?")
-        out.append("  3. Where exactly is the mismatch (which field, singleton, static, or global)?")
-        out.append("  4. Which fix strategy from the list above is the smallest change that breaks the dependency?")
-    elif test_type == "td":
-        out.append("  1. What does the failure stack trace point at? Which method, which line, which API call?")
-        out.append("  2. What do the TOP DISTINCTIVE FLAKY-ONLY trace sequences and TOP FREQUENCY")
-        out.append("     DIFFERENCES tell you about *what* the failing run is doing differently?")
-        out.append("  3. Is this a timing bound, an asynchrony issue, a non-deterministic ordering,")
-        out.append("     an implicit-state assumption, or something else? Justify with evidence above.")
-        out.append("  4. Which fix category is the smallest change that addresses the identified cause?")
-    else:
-        out.append("  1. What is the source of non-determinism (timing, threads, platform, random, etc.)?")
-        out.append("  2. Which specific line(s) in the test or production code are affected?")
-        out.append("  3. Why does this cause intermittent failure?")
-        out.append("  4. Which fix strategy from the list above is the smallest change that eliminates the non-determinism?")
-    out.append("  5. DRAFT the patch mentally. For each changed line, write down both the")
-    out.append("     ORIGINAL line (to be removed) and the REPLACEMENT line (to be added).")
-    out.append("  6. SELF-VERIFY the drafted patch against this checklist. Each item is a")
-    out.append("     bug we have seen LLMs make on this prompt. If any item fails, fix the")
-    out.append("     draft inside OUTPUT 0 — do NOT 'redo' it inside OUTPUT A.")
-    out.append("       (a) Replacing a line requires BOTH a '-' for the original AND a '+'")
-    out.append("           for the new version. A '+' without a matching '-' on a CHANGED")
-    out.append("           line produces duplicate code (e.g. two @Test annotations stacked,")
-    out.append("           which is a Java compile error).")
-    out.append("       (b) Each hunk header is @@ -A,B +C,D @@ where")
-    out.append("              B = (context lines) + ('-' lines)")
-    out.append("              D = (context lines) + ('+' lines)")
-    out.append("           Recount carefully. Wrong counts cause patch(1) to fail or fuzzy-match.")
-    out.append("       (c) Mentally apply the diff to the original file and read the result:")
-    out.append("           is it valid Java? No duplicate annotations, no unmatched braces,")
-    out.append("           no orphaned imports, no broken signatures, no half-written stmts.")
-    out.append("       (d) The diff contains ONLY the changes implied by your diagnosis —")
-    out.append("           no collateral edits, no whitespace-only churn, no comment additions,")
-    out.append("           no reformatting of nearby code.")
-    out.append("       (e) Paths in the diff are relative to the project root and exist in the")
-    out.append("           VICTIM SOURCE / PRODUCTION CODE shown above. No fictitious files.")
-    out.append("")
-    out.append("This section is for you (the LLM) to think aloud. After OUTPUT 0 ends,")
-    out.append("OUTPUT A must be FINAL — no further reasoning, retries, or redos belong")
-    out.append("inside OUTPUT A or OUTPUT B.")
-    out.append("")
-
-    # OUTPUT A — Patch
-    out.append("OUTPUT A — PATCH:")
-    out.append("The unified diff that implements the fix you finalised in OUTPUT 0.")
-    out.append("Emit EXACTLY ONE ```diff fenced block. No prose before or after the")
-    out.append("block, no second attempt.")
-    out.append("")
-    out.append("APPLIER NOTE: the diff will be applied with `git apply --recount`,")
-    out.append("which RECOMPUTES hunk line counts. This means:")
-    out.append("  - You do NOT need to count lines exactly. Off-by-one errors in the")
-    out.append("    ',N' fields of '@@ -L,N +L,N @@' will be silently corrected.")
-    out.append("  - The L (start line) numbers and the hunk BODY (context/'-'/'+'")
-    out.append("    lines) still must be correct: --recount only fixes counts, not")
-    out.append("    missing/wrong context.")
-    out.append("  - When unsure of the exact start line, prefer the form")
-    out.append("    '@@ -L +L @@' (no commas, no counts) — --recount accepts it.")
-    out.append("  - DO NOT emit anchorless '@@\\n' headers; --recount cannot find")
-    out.append("    the hunk without at least the start line number.")
-    out.append("  - Every non-empty hunk-body line MUST start with ' ', '+' or '-'.")
-    out.append("    Blank context lines are a single space, never empty.")
-    out.append("```diff")
-    out.append("<unified diff with absolute paths from project root, headers '@@ -L +L @@'")
-    out.append(" or '@@ -L,N +L,N @@', applied via `git apply --recount`>")
-    out.append("```")
-    out.append("")
-
-    # OUTPUT B — Developer Guide (structured, redundant with OUTPUT A)
-    out.append("OUTPUT B — DEVELOPER GUIDE:")
-    out.append("Output B is REQUIRED. It serves two purposes: (i) a structured,")
-    out.append("redundant representation of the fix that survives if OUTPUT A's diff")
-    out.append("is malformed, and (ii) human-readable justification + exemplar code")
-    out.append("suitable for corpus extraction.")
-    out.append("")
-    out.append("### ROOT_CAUSE")
-    out.append("<2-4 sentences in plain English: what causes the test to fail. NOT a")
-    out.append(" restatement of the diff — name the underlying defect.>")
-    out.append("")
-    out.append("### FIX_DESCRIPTION")
-    out.append("<2-4 sentences: which file(s) you edit, what you add/remove/change, and")
-    out.append(" WHY that addresses the root cause. A justification, not a diff replay.>")
-    out.append("")
-    out.append("### FIXED_CODE")
-    out.append("For EACH modified file, emit ONE block in this exact format:")
-    out.append("")
-    out.append("@@FILE: <path relative to project root, e.g. src/test/java/com/example/FooTest.java>")
-    out.append("@@IMPORTS:")
-    out.append("<any NEW import statements to add, one per line; omit @@IMPORTS: entirely if none>")
-    out.append("@@METHOD: <method name, e.g. testFoo>")
-    out.append("@@OPERATION: replace_method | insert_method")
-    out.append("@@ANCHOR: before_method=<name> | after_method=<name> | end_of_class")
-    out.append("```java")
-    out.append("<complete fixed method including annotations, signature, full body, closing brace>")
-    out.append("```")
-    out.append("")
-    out.append("Rules for FIXED_CODE:")
-    out.append("- Use exactly these markers: '@@FILE: ', '@@IMPORTS:' (on its own line),")
-    out.append("  '@@METHOD: ', '@@OPERATION: ', '@@ANCHOR: ' — same prefixes, same colons,")
-    out.append("  same spacing.")
-    out.append("- Repeat @@METHOD + @@OPERATION + (@@ANCHOR if needed) + ```java block for")
-    out.append("  each method that changes IN THE SAME FILE.")
-    out.append("- Repeat the full @@FILE block for each ADDITIONAL file.")
-    out.append("- @@IMPORTS lists ONLY new imports not already present. Omit the marker line")
-    out.append("  entirely if no new imports are needed.")
-    out.append("- @@OPERATION is REQUIRED on every @@METHOD block:")
-    out.append("    * 'replace_method' if a method with this name already exists in the")
-    out.append("      original file (the fix rewrites its body or annotations).")
-    out.append("    * 'insert_method' if the method is NEW (not present in the original).")
-    out.append("- @@ANCHOR is REQUIRED when @@OPERATION is 'insert_method' and FORBIDDEN")
-    out.append("  when 'replace_method'. Allowed forms:")
-    out.append("    * 'before_method=<name>' — insert immediately before this existing method.")
-    out.append("    * 'after_method=<name>' — insert immediately after this existing method.")
-    out.append("    * 'end_of_class' — append as the last member of the outer class.")
-    out.append("  Prefer 'before_method=' anchored on the polluter or related setup, so the")
-    out.append("  new method sits with its logical neighbours.")
-    out.append("- Always include the FULL method body — never use ellipsis or '// ... unchanged'.")
-    out.append("")
-    out.append("CROSS-CHECK BEFORE FINALISING (mandatory before you stop generating):")
-    out.append("Verify all of the following against your own draft:")
-    out.append("  [1] Number of methods changed by OUTPUT A's diff equals the number of")
-    out.append("      @@METHOD blocks in OUTPUT B's FIXED_CODE.")
-    out.append("  [2] For EACH changed method, the result of applying OUTPUT A's diff")
-    out.append("      (i.e. take the original method, drop '-' lines, add '+' lines) is")
-    out.append("      LINE-FOR-LINE equivalent to the @@METHOD block in OUTPUT B —")
-    out.append("      same annotations, same signature, same body, same closing brace.")
-    out.append("  [3] Every NEW import line added by OUTPUT A's diff appears under")
-    out.append("      @@IMPORTS in OUTPUT B for the same file (and vice versa).")
-    out.append("  [4] OUTPUT A contains exactly ONE ```diff block. OUTPUT B contains")
-    out.append("      exactly ONE ### ROOT_CAUSE section, ONE ### FIX_DESCRIPTION section,")
-    out.append("      and ONE ### FIXED_CODE section.")
-    out.append("  [5] Every @@METHOD block has an @@OPERATION line. If the named method")
-    out.append("      is new (not in the original file), its operation is 'insert_method'")
-    out.append("      and it has an @@ANCHOR line; if the named method already exists,")
-    out.append("      its operation is 'replace_method' and there is NO @@ANCHOR line.")
-    out.append("  [6] @@OPERATION/@@ANCHOR agree with what OUTPUT A's diff actually does:")
-    out.append("      a 'replace_method' block corresponds to a hunk that has both '-' and")
-    out.append("      '+' lines on the named method; an 'insert_method' block corresponds")
-    out.append("      to a hunk that has only '+' lines for the new method, positioned")
-    out.append("      consistently with the @@ANCHOR.")
-    out.append("If any of [1]-[6] disagree, RECONCILE both outputs (regenerate them in")
-    out.append("OUTPUT 0's reasoning, then re-emit) before sending. The two outputs MUST")
-    out.append("describe the IDENTICAL set of edits.")
-
-    # --- Write output ---
-    output_text = "\n".join(out)
-    steps_dir = os.path.join(base, "Steps Output Files")
-    os.makedirs(steps_dir, exist_ok=True)
-    output_file = os.path.join(steps_dir, "llm_context.txt")
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(output_text)
-
-    try:
-        print(output_text)
-    except UnicodeEncodeError:
-        print(output_text.encode("ascii", errors="replace").decode("ascii"))
-    print(f"\nSaved to: {output_file}")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <result_container>")
-        sys.exit(1)
-
-    assemble_context(sys.argv[1])

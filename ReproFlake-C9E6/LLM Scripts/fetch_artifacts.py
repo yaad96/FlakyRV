@@ -12,24 +12,36 @@ format the results as a single Turn 2 user message.
 Supported artifact types (extensible):
   IMPORTS_OF        target: <relative path to .java file>
                     returns: package + import lines from the file's header
-  FULL_FILE         target: <relative path to .java file>
-                    returns: entire file content (capped at 800 lines)
+  FILE_SKELETON     target: <relative path to .java file>
+                    returns: structural view of the file — package + imports
+                    + class signature(s) + field declarations + method
+                    signatures (NO method bodies). Inner classes are shown
+                    structurally. Capped at 300 lines.
   METHOD            target: <FQN>#<methodName>
-                    returns: a single method body extracted from the file
-                    that defines the FQN class
+                    returns: a single method body (annotations + signature
+                    + body), capped at 100 lines with a truncation marker.
+  AROUND            target: <relative path to .java file>#L<line> (or
+                    `#L<start>-<end>` for an explicit range)
+                    returns: ±100 lines around the named line, with a
+                    leading header showing the absolute line range.
   SPEC_DEFINITION   target: <SpecName>
                     returns: contents of Valg/scripts/props/<SpecName>.mop
-                    (falls back to props-track/)
-  POM_DEPENDENCY    target: <groupId>:<artifactId>
-                    returns: matching <dependency> blocks from any pom.xml
-                    in the project tree, with their relative pom path
+                    (falls back to props-track/). The RV trace summary
+                    references specs by name; this retriever fetches the
+                    formal MOP definition so the LLM can interpret what
+                    contract was violated.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
+
+# Reuse the structural-header extractor from the shared assembler module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from assemble_llm_context import extract_class_header  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Paths — this file lives in ReproFlake-C9E6/LLM Scripts/
@@ -60,10 +72,15 @@ ARTIFACT_ITEM_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Closed enum of supported artifact types (kept in sync with the prompt's
-# `Closed enum of supported types` section in assemble_llm_context.py
-# and assemble_llm_context_id.py).
-_ARTIFACT_TYPES = ("IMPORTS_OF", "FULL_FILE", "METHOD", "SPEC_DEFINITION", "POM_DEPENDENCY")
+# Closed enum of supported artifact types. Kept in sync with the prompt's
+# `Closed enum of supported types` section in each per-type assembler.
+_ARTIFACT_TYPES = (
+    "IMPORTS_OF",
+    "FILE_SKELETON",
+    "METHOD",
+    "AROUND",
+    "SPEC_DEFINITION",
+)
 
 # Lenient schema #1: type-as-tag-name (observed from gpt-4o):
 #   <METHOD target="x.y.Z#m" reason="..."/>
@@ -94,13 +111,20 @@ def parse_artifact_block(text: str):
     Schema 2 is what gpt-4o tends to emit on its own — accepting it
     prevents a silent drop of the entire turn-2 artifact request.
     """
-    block_match = ARTIFACT_BLOCK_RE.search(text)
-    if not block_match:
+    # Find ALL <ARTIFACTS_REQUESTED> blocks, not just the first. The LLM
+    # sometimes declares "NONE" upfront and then mid-OUTPUT-0 realizes it
+    # actually needs source — emitting a second block with a real LIST and
+    # then stopping (without writing OUTPUT A/B). Using `.search()` would
+    # take the first NONE and silently skip turn 2, leaving apply_fix with
+    # no usable patch (observed on elasticjob294, May 2026 — the LLM said
+    # NONE then asked for GsonFactory.java a few paragraphs later).
+    #
+    # Policy: if any block contains parseable artifact items, treat the
+    # whole response as a LIST request. Only return NONE when every block
+    # is NONE-style. Items are deduped across blocks.
+    blocks = list(ARTIFACT_BLOCK_RE.finditer(text))
+    if not blocks:
         return ("ABSENT", [])
-
-    body = block_match.group(1).strip()
-    if body.upper() == "NONE" or body.upper().startswith("NONE -"):
-        return ("NONE", [])
 
     items = []
     seen = set()  # dedup if both schemas match the same item
@@ -116,10 +140,12 @@ def parse_artifact_block(text: str):
             "reason": (reason or "").strip(),
         })
 
-    for m in ARTIFACT_ITEM_RE.finditer(body):
-        _add(m.group("type"), m.group("target"), m.group("reason"))
-    for m in ARTIFACT_ITEM_TYPED_TAG_RE.finditer(body):
-        _add(m.group("type"), m.group("target"), m.group("reason"))
+    for b in blocks:
+        body = b.group(1).strip()
+        for m in ARTIFACT_ITEM_RE.finditer(body):
+            _add(m.group("type"), m.group("target"), m.group("reason"))
+        for m in ARTIFACT_ITEM_TYPED_TAG_RE.finditer(body):
+            _add(m.group("type"), m.group("target"), m.group("reason"))
 
     if items:
         return ("LIST", items)
@@ -221,23 +247,70 @@ def _imports_of(source_base: str, target: str) -> str:
     return "\n".join(out_lines).strip() or "(empty header)"
 
 
-def _full_file(source_base: str, target: str, max_lines: int = 800) -> str:
+def _file_skeleton(source_base: str, target: str, max_lines: int = 300) -> str:
+    """Return a structural view of the file (package + imports + class
+    signatures + field declarations + method signatures, no method bodies).
+    Reuses extract_class_header from the shared assembler module."""
     path = _resolve_in_flaky(source_base, target)
     if not path:
         return f"(file not found: {target})"
+    text = extract_class_header(
+        str(path),
+        include_inner_classes=True,
+        max_lines=max_lines,
+    )
+    if text is None:
+        return f"(file not readable: {target})"
+    return text
+
+
+# Parses line targets out of an AROUND target string. Accepted forms:
+#   #L42        single line
+#   #L20-25     line range
+#   #L20-L25    line range (lenient — same as #L20-25, the trailing 'L' is
+#               a common typo and we don't want to silently drop the request)
+_AROUND_LINE_RE = re.compile(r"#L(?P<a>\d+)(?:-L?(?P<b>\d+))?\s*$")
+
+
+def _around(source_base: str, target: str, window: int = 100) -> str:
+    """Return a window of lines around the target line (`<path>#L<n>`) or an
+    explicit line range (`<path>#L<start>-<end>`). The window adds ±`window`
+    lines around the target/range. Always emits an absolute-line-number
+    header so the LLM knows where the slice came from."""
+    m = _AROUND_LINE_RE.search(target)
+    if not m:
+        return "(AROUND target must be '<relative-path>#L<line>' or '#L<start>-<end>')"
+    path_part = target[: m.start()]
+    a = int(m.group("a"))
+    b = int(m.group("b")) if m.group("b") else a
+    if b < a:
+        a, b = b, a
+
+    path = _resolve_in_flaky(source_base, path_part)
+    if not path:
+        return f"(file not found: {path_part})"
     with path.open(encoding="utf-8") as f:
         lines = f.readlines()
-    if len(lines) > max_lines:
-        return (
-            "".join(lines[:max_lines])
-            + f"\n... ({len(lines) - max_lines} more lines truncated)\n"
-        )
-    return "".join(lines)
+
+    n = len(lines)
+    start = max(1, a - window)         # 1-indexed inclusive
+    end = min(n, b + window)           # 1-indexed inclusive
+    selected = lines[start - 1 : end]  # slice is 0-indexed half-open
+
+    # Header uses '//' so the result doesn't start with '(' — the dispatch
+    # treats '(' as the failure-marker convention.
+    target_str = f"L{a}" + (f"-L{b}" if b != a else "")
+    header = (
+        f"// AROUND: lines {start}-{end} of {path_part} "
+        f"(target: {target_str})\n"
+    )
+    return header + "".join(selected)
 
 
-def _extract_method(file_path: Path, method_name: str) -> str:
+def _extract_method(file_path: Path, method_name: str, max_lines: int = 100) -> str:
     """Find a method by name and return its source (annotations + signature
-    + body up through the matching closing brace)."""
+    + body up through the matching closing brace). Truncates at max_lines
+    with a marker so very long methods don't blow the artifact budget."""
     with file_path.open(encoding="utf-8") as f:
         lines = f.readlines()
 
@@ -274,7 +347,17 @@ def _extract_method(file_path: Path, method_name: str) -> str:
 
     if end is None:
         end = min(method_start + 60, len(lines) - 1)
-    return "".join(lines[method_start : end + 1])
+
+    method_lines = lines[method_start : end + 1]
+    if len(method_lines) > max_lines:
+        omitted = len(method_lines) - max_lines
+        truncated = method_lines[:max_lines]
+        truncated.append(
+            f"// ... {omitted} more lines truncated; "
+            f"use AROUND with #L<line> to see specific lines ...\n"
+        )
+        return "".join(truncated)
+    return "".join(method_lines)
 
 
 def _method(source_base: str, target: str) -> str:
@@ -301,49 +384,15 @@ def _spec_definition(source_base: str, target: str) -> str:
     return f"(spec not found in props/ or props-track/: {target})"
 
 
-def _pom_dependency(source_base: str, target: str) -> str:
-    if ":" not in target:
-        return "(POM_DEPENDENCY target must be 'groupId:artifactId')"
-    group_id, artifact_id = target.split(":", 1)
-    group_id, artifact_id = group_id.strip(), artifact_id.strip()
-    flaky = _flaky_root(source_base)
-    found: list[str] = []
-
-    dep_re = re.compile(
-        r"<dependency>(?:(?!</dependency>).)*?<groupId>\s*"
-        + re.escape(group_id)
-        + r"\s*</groupId>(?:(?!</dependency>).)*?<artifactId>\s*"
-        + re.escape(artifact_id)
-        + r"\s*</artifactId>(?:(?!</dependency>).)*?</dependency>",
-        re.DOTALL,
-    )
-
-    for root, _, files in os.walk(flaky):
-        if "pom.xml" not in files:
-            continue
-        pom_path = Path(root) / "pom.xml"
-        try:
-            content = pom_path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for m in dep_re.finditer(content):
-            rel = pom_path.relative_to(flaky)
-            found.append(f"# from {rel}\n{m.group(0)}")
-
-    if not found:
-        return f"(no <dependency> matching {target} found in any pom.xml)"
-    return "\n\n".join(found)
-
-
 # ---------------------------------------------------------------------------
 # Dispatch + format
 # ---------------------------------------------------------------------------
 RETRIEVERS = {
     "IMPORTS_OF": _imports_of,
-    "FULL_FILE": _full_file,
+    "FILE_SKELETON": _file_skeleton,
     "METHOD": _method,
+    "AROUND": _around,
     "SPEC_DEFINITION": _spec_definition,
-    "POM_DEPENDENCY": _pom_dependency,
 }
 
 MAX_REQUESTS_PER_TURN = 5
@@ -446,9 +495,9 @@ def format_artifacts_block(results) -> str:
     out.append("    must describe the IDENTICAL set of edits; every @@METHOD has")
     out.append("    @@OPERATION and (for 'insert_method') @@ANCHOR.")
     out.append("")
-    out.append("If your fix touches a file you have NOT seen via FULL_FILE,")
-    out.append("prefer the structured @@METHOD/@@OPERATION/@@ANCHOR form in")
-    out.append("OUTPUT B over relying on exact line numbers in OUTPUT A — the")
-    out.append("structured form is robust to line-number guesses; unified diffs")
-    out.append("are not.")
+    out.append("If your fix touches a file whose full body you have NOT seen")
+    out.append("(only its FILE_SKELETON / METHOD / AROUND view), prefer the")
+    out.append("structured @@METHOD/@@OPERATION/@@ANCHOR form in OUTPUT B over")
+    out.append("relying on exact line numbers in OUTPUT A — the structured form")
+    out.append("is robust to line-number guesses; unified diffs are not.")
     return "\n".join(out)

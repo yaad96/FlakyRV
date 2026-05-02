@@ -24,7 +24,7 @@
 #       copy events_encoding_id.txt + patch_compare.py)
 #   8C. compare-traces-official.py       -> step_8_C_official.txt
 #   9.  generate_llm_summary.py          -> llm_trace_summary.txt
-#   10. assemble_llm_context.py          -> llm_context.txt
+#   10. assemble_llm_context_td.py       -> llm_context.txt
 #   11. call_llm.py (dispatches to claude or openai) -> llm_response.json
 #   12. apply_fix.py                     -> patches Flaky/ + recompiles bytecode
 #   13. re-run victim against patched Flaky/ -> verify_after_fix.log
@@ -320,8 +320,8 @@ echo "[step 9 ] generate_llm_summary.py     -> $STEPS_REL/llm_trace_summary.txt"
 # ============================================================
 # STEP 10 — Assemble LLM context
 # ============================================================
-echo "[step 10] assemble_llm_context.py     -> $STEPS_REL/llm_context.txt"
-( cd "$LLM_SCRIPTS_DIR" && python3 assemble_llm_context.py "$RESULT_CONTAINER" ) >/dev/null
+echo "[step 10] assemble_llm_context_td.py  -> $STEPS_REL/llm_context.txt"
+( cd "$LLM_SCRIPTS_DIR" && python3 assemble_llm_context_td.py "$RESULT_CONTAINER" ) >/dev/null
 
 # ============================================================
 # STEP 11 — Call LLM (mandatory; backend = $LLM_BACKEND)

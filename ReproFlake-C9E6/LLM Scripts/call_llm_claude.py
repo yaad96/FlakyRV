@@ -105,7 +105,8 @@ def main():
             os.remove(stale)
 
     if not os.path.isfile(context_file):
-        print(f"ERROR: {context_file} not found. Run assemble_llm_context.py first.", file=sys.stderr)
+        print(f"ERROR: {context_file} not found. Run the per-type assembler first "
+              f"(assemble_llm_context_od.py / _td.py / _id.py / _nio.py).", file=sys.stderr)
         sys.exit(1)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
