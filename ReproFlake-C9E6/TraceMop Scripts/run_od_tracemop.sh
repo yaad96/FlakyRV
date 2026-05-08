@@ -56,14 +56,14 @@ LLM_BACKEND="${2:?Usage: $0 <result_container> <claude|openai>   (second arg pic
 
 case "$LLM_BACKEND" in
   claude)
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    if [[ -z "${SIMULATE_FROM:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
       echo "ERROR: ANTHROPIC_API_KEY is not set. Step 9 (claude backend) requires it."
       echo "       export ANTHROPIC_API_KEY=sk-ant-...   then re-run."
       exit 1
     fi
     ;;
   openai)
-    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    if [[ -z "${SIMULATE_FROM:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
       echo "ERROR: OPENAI_API_KEY is not set. Step 9 (openai backend) requires it."
       echo "       export OPENAI_API_KEY=sk-...   then re-run."
       exit 1
