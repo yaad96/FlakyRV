@@ -299,8 +299,9 @@ Two LLM backends are supported:
 - `claude` — Anthropic `claude-sonnet-4-6` ([call_llm_claude.py:38](LLM%20Scripts/call_llm_claude.py#L38)). Requires `ANTHROPIC_API_KEY`.
 - `openai` — OpenAI `gpt-4o` ([call_llm_openai.py:37](LLM%20Scripts/call_llm_openai.py#L37)). Requires `OPENAI_API_KEY`.
 
-Per-run token counts and wall-clock time are recorded in `summary.csv` and in
-the top-level `Complete Containers Summary.csv`.
+Per-run token counts and wall-clock time are recorded in `summary.csv` (and
+its human-readable companion `summary.md`) and in the top-level
+`Complete Containers Summary.csv`.
 
 ---
 
@@ -316,7 +317,8 @@ ReproFlake-C9E6/
 └── data/
     └── FULL RUNS: RV/                            # "FULL RUNS: NO RV/" when --rv-traces no is used
         └── jnrposixd9f3f84 runs/
-            ├── summary.csv                       # per-run aggregate over every run on disk
+            ├── summary.csv                       # per-run aggregate over every run on disk (machine-readable)
+            ├── summary.md                        # same data as summary.csv, formatted as a human-readable pass@k report
             ├── Claude/
             │   ├── run 1/
             │   │   ├── pipeline.log              # complete stdout of the orchestrator
@@ -345,7 +347,8 @@ Three files address the most common questions:
 - **Verdict for a single run** — `verify_after_fix.verdict` (one of `PASSED`,
   `FAILED`, or `INCOMPLETE`).
 - **Aggregate across runs** — `summary.csv` (one row per run, importable into
-  a spreadsheet).
+  a spreadsheet) and its human-readable companion `summary.md` (pass@k
+  report with per-run diagnosis snippets and clickable artifact links).
 - **Cross-container, cross-invocation log** — `Complete Containers Summary.csv`
   at the `ReproFlake-C9E6/` root. Join back to `test_config.csv` on the
   `container` column to retrieve victim FQN, polluter, and other container
@@ -392,7 +395,7 @@ and result aggregation.
 | `TraceMop Scripts/run_id_tracemop.sh` | End-to-end orchestrator for ID flaky tests. It runs a passing baseline and a NonDex seeded failing run under TraceMOP, compares traces, generates the LLM prompt, calls the selected backend, applies the patch, and verifies with the same NonDex seed. |
 | `TraceMop Scripts/run_nio_tracemop.sh` | End-to-end orchestrator for NIO flaky tests. It generates a JUnit wrapper that runs the victim twice in one JVM, traces Fixed and Flaky wrapper executions, prompts the LLM, applies the fix, and verifies that the patched wrapper passes both invocations. |
 | `TraceMop Scripts/run_od_tracemop.sh` | End-to-end orchestrator for OD flaky tests. It runs the polluter and victim in deterministic order on Fixed and Flaky variants, collects and compares TraceMOP traces, invokes the LLM repair flow, and verifies the patched Flaky variant with the same ordered test run. |
-| `TraceMop Scripts/run_pass_at_k.py` | Batch wrapper for repeated experiments across models and runs. It selects the correct per-type orchestrator from `test_config.csv`, toggles the RV/no-RV prompt ablation, archives each run, computes pass-at-k summaries, and appends the top-level completion CSV. |
+| `TraceMop Scripts/run_pass_at_k.py` | Batch wrapper for repeated experiments across models and runs. It selects the correct per-type orchestrator from `test_config.csv`, toggles the RV/no-RV prompt ablation, archives each run, writes per-container `summary.csv` + `summary.md` (pass-at-k report with diagnosis snippets and artifact links), and appends the top-level `Complete Containers Summary.csv`. |
 | `TraceMop Scripts/run_td_tracemop.sh` | End-to-end orchestrator for TD flaky tests. It materializes Fixed and FlakyCodeChange variants, traces both, compares runtime behavior, assembles the TD prompt, calls the LLM, applies the patch, and verifies the patched victim test. |
 
 
@@ -420,7 +423,7 @@ their purpose and the scripts involved.
 | `step 10` | Apply the LLM-produced fix to `Flaky/`, then compile/recompile touched code and write `apply_report.json`. | [`feedback_loop.sh`](TraceMop%20Scripts/feedback_loop.sh), [`apply_fix.py`](LLM%20Scripts/apply_fix.py) |
 | `step 11` | Re-run the OD polluter/victim order against patched `Flaky/` and write `verify_after_fix.log` plus `verify_after_fix.verdict`. | [`run_od_tracemop.sh`](TraceMop%20Scripts/run_od_tracemop.sh), [`feedback_loop.sh`](TraceMop%20Scripts/feedback_loop.sh) |
 | optional feedback retry | If the first patch fails to apply, compile, or pass verification, build a feedback prompt, ask the same LLM for a corrected patch, restore `Flaky/`, and repeat steps 10-11 once. | [`feedback_loop.sh`](TraceMop%20Scripts/feedback_loop.sh), [`build_feedback.py`](LLM%20Scripts/build_feedback.py), [`call_llm.py`](LLM%20Scripts/call_llm.py) |
-| final summary | Print trace directories, output file sizes, and the final post-fix verdict. If invoked through pass@k, the wrapper archives this run and updates `summary.csv`. | [`run_od_tracemop.sh`](TraceMop%20Scripts/run_od_tracemop.sh), [`run_pass_at_k.py`](TraceMop%20Scripts/run_pass_at_k.py) |
+| final summary | Print trace directories, output file sizes, and the final post-fix verdict. If invoked through pass@k, the wrapper archives this run and updates `summary.csv` and `summary.md`. | [`run_od_tracemop.sh`](TraceMop%20Scripts/run_od_tracemop.sh), [`run_pass_at_k.py`](TraceMop%20Scripts/run_pass_at_k.py) |
 
 `run_pass_at_k.py` sets `KEEP_CONTAINER=1` while each per-run orchestrator is
 executing so the same container can be reused within the batch. Unless

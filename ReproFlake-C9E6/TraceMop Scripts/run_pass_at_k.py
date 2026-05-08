@@ -592,7 +592,8 @@ def append_complete_summary(rows, rv_traces):
           f"{COMPLETE_SUMMARY_FILE.name}")
 
 
-def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
+def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model,
+                  log_prefix="[wrapper]"):
     csv_path = runs_root / "summary.csv"
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLS, quoting=csv.QUOTE_ALL,
@@ -601,11 +602,6 @@ def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
         for r in rows:
             w.writerow(r)
 
-    # summary.md generation disabled: the hardcoded "pass@k" / "Plausibility
-    # (plausible)" terminology is older naming we no longer want surfaced in
-    # published outputs. summary.csv above remains the canonical aggregate.
-    # To re-enable, remove the surrounding triple-quoted string.
-    """
     md = [f"# {container} — pass@k report\n"]
     md.append(f"**Test type**: {row_meta['test_type']}     "
               f"**Module**: {row_meta.get('module','')}     "
@@ -670,16 +666,18 @@ def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model):
         if r["fail_snippet"]:
             md.append(f"- **Fail snippet**: `{r['fail_snippet']}`")
         # Markdown link — model dir name has no spaces, only the `run N`
-        # segment needs URL-encoded spaces.
+        # segment needs URL-encoded spaces. TD test type archives the patched
+        # variant under FlakyCodeChange/ instead of Flaky/, so the source-link
+        # leaf name follows the test_type.
         link_dir = f"{model_dir_name}/run%20{r['run']}"
+        src_dir = "FlakyCodeChange" if r["test_type"] == "td" else "Flaky"
         md.append(f"- 📁 [pipeline.log]({link_dir}/pipeline.log) · "
                   f"[Steps Output Files/]({link_dir}/Steps%20Output%20Files/) · "
-                  f"[Flaky/]({link_dir}/Flaky/)\n")
+                  f"[{src_dir}/]({link_dir}/{src_dir}/)\n")
 
     md_path = runs_root / "summary.md"
     md_path.write_text("\n".join(md), encoding="utf-8")
-    """
-    print(f"[wrapper] summary written: {csv_path.name}")
+    print(f"{log_prefix} summary written: {csv_path.name}, {md_path.name}")
 
 
 # ---------------------------------------------------------------------------

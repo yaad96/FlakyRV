@@ -15,6 +15,7 @@ prints and exit code propagate directly. Extra trailing args (e.g.
 `--feedback-from <file>`) are forwarded to the backend verbatim.
 """
 
+import os
 import sys
 
 
@@ -27,6 +28,16 @@ def main():
     result_container = sys.argv[1]
     backend = sys.argv[2]
     extra_args = sys.argv[3:]   # forwarded to the backend (e.g. --feedback-from <file>)
+
+    # Simulation mode: when SIMULATE_FROM is set, replay archived LLM
+    # responses instead of calling a live backend. The chosen backend name
+    # is ignored — canned files carry whatever shape (Claude vs OpenAI) the
+    # original backend wrote.
+    if os.environ.get("SIMULATE_FROM"):
+        import call_llm_simulate
+        sys.argv = ["call_llm_simulate.py", result_container] + extra_args
+        call_llm_simulate.main()
+        return
 
     if backend == "claude":
         import call_llm_claude as backend_mod

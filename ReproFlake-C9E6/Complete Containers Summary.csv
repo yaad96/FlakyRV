@@ -98,10 +98,3 @@
 "2026-05-04T05:15:36+00:00","ZOOKEEPER-2181","td","claude","run 2","FAILED","4","no","yes","FAILED","test_failed","42193","11526","53719","164.2"
 "2026-05-04T05:19:14+00:00","ZOOKEEPER-2181","td","openai","run 1","FAILED","4","no","yes","FAILED","test_failed","27341","2089","29430","24.8"
 "2026-05-04T05:22:48+00:00","ZOOKEEPER-2181","td","openai","run 2","FAILED","3","no","yes","FAILED","compile_failed","21987","1934","23921","22.1"
-
-
-"2026-05-05T13:21:44+00:00","jnrposixd9f3f84","od","claude","run 1","PASSED","2","yes","no","PASSED","","23105","3619","26724","67.2"
-"2026-05-05T13:23:48+00:00","jnrposixd9f3f84","od","claude","run 2","PASSED","1","yes","no","PASSED","","10248","1799","12047","25.9"
-"2026-05-05T13:25:47+00:00","jnrposixd9f3f84","od","claude","run 3","PASSED","1","yes","no","PASSED","","10507","1713","12220","22.9"
-"2026-05-05T13:27:10+00:00","jnrposixd9f3f84","od","openai","run 1","INCOMPLETE","0","yes","no","INCOMPLETE","","0","0","0","0.0"
-"2026-05-05T13:28:21+00:00","jnrposixd9f3f84","od","openai","run 2","INCOMPLETE","0","yes","no","INCOMPLETE","","0","0","0","0.0"
