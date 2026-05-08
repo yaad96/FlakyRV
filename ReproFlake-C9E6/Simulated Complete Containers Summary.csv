@@ -1,15 +1,20 @@
 "timestamp","container","test_type","model","run","final verdict","turns_taken","rv_traces_used","feedback_used","verdict_pre_feedback","feedback_category","input_tokens","output_tokens","total_tokens","llm_seconds"
-"2026-05-08T01:12:05+00:00","elasticjob294","nio","claude","run 1","PASSED","3","yes","yes","FAILED","compile_failed","32764","5404","38168","64.8"
-"2026-05-08T01:14:35+00:00","elasticjob294","nio","claude","run 2","PASSED","2","yes","no","PASSED","","18711","3791","22502","63.6"
-"2026-05-08T01:17:07+00:00","elasticjob294","nio","openai","run 1","FAILED","4","yes","yes","FAILED","compile_failed","33444","1735","35179","15.3"
-"2026-05-08T01:19:13+00:00","elasticjob294","nio","openai","run 2","FAILED","4","yes","yes","FAILED","test_failed","33999","2076","36075","20.9"
-
-"2026-05-08T01:26:40+00:00","jnrposixd9f3f84","od","claude","run 1","PASSED","1","yes","no","PASSED","","9984","2637","12621","36.2"
-"2026-05-08T01:28:39+00:00","jnrposixd9f3f84","od","claude","run 2","PASSED","1","yes","no","PASSED","","10290","1964","12254","33.3"
-
 "2026-05-08T02:32:38+00:00","jnrposixd9f3f84","od","claude","run 1","PASSED","1","yes","no","PASSED","","9984","2637","12621","36.2"
 "2026-05-08T02:34:45+00:00","jnrposixd9f3f84","od","claude","run 2","PASSED","1","yes","no","PASSED","","10290","1964","12254","33.3"
 "2026-05-08T02:36:35+00:00","jnrposixd9f3f84","od","openai","run 1","PASSED","2","yes","no","PASSED","","16350","989","17339","41.1"
 "2026-05-08T02:38:16+00:00","jnrposixd9f3f84","od","openai","run 2","FAILED","3","yes","yes","FAILED","compile_failed","26869","2152","29021","54.4"
 
 "2026-05-08T02:42:00+00:00","jnrposixd9f3f84","od","claude","run 1","PASSED","1","no","no","PASSED","","6430","1418","7848","24.7"
+"2026-05-08T02:45:04+00:00","jnrposixd9f3f84","od","claude","run 2","PASSED","1","no","no","PASSED","","6430","3713","10143","46.1"
+"2026-05-08T02:48:18+00:00","jnrposixd9f3f84","od","openai","run 1","FAILED","3","no","yes","FAILED","compile_failed","19481","1977","21458","45.0"
+"2026-05-08T02:57:14+00:00","jnrposixd9f3f84","od","openai","run 2","PASSED","3","no","yes","FAILED","compile_failed","19381","1839","21220","35.1"
+
+"2026-05-08T12:21:48+00:00","elasticjobf0d","nio","claude","run 1","PASSED","1","yes","no","PASSED","","17451","1418","18869","20.3"
+"2026-05-08T12:27:03+00:00","elasticjobf0d","nio","claude","run 2","PASSED","1","yes","no","PASSED","","9606","1902","11508","23.8"
+"2026-05-08T12:30:42+00:00","elasticjobf0d","nio","openai","run 1","PASSED","2","yes","no","PASSED","","15991","940","16931","9.8"
+"2026-05-08T12:36:14+00:00","elasticjobf0d","nio","openai","run 2","FAILED","4","yes","yes","FAILED","test_failed","37406","1794","39200","14.4"
+
+"2026-05-08T12:39:58+00:00","elasticjobf0d","nio","claude","run 1","PASSED","1","no","no","PASSED","","6128","1631","7759","25.9"
+"2026-05-08T12:43:25+00:00","elasticjobf0d","nio","claude","run 2","PASSED","1","no","no","PASSED","","6128","2244","8372","25.0"
+"2026-05-08T12:47:43+00:00","elasticjobf0d","nio","openai","run 1","PASSED","2","no","no","PASSED","","10940","975","11915","6.6"
+"2026-05-08T12:54:18+00:00","elasticjobf0d","nio","openai","run 2","FAILED","4","no","yes","FAILED","test_failed","27726","1889","29615","16.0"

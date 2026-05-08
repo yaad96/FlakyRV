@@ -28,6 +28,7 @@ that the reproducibility pipeline relies on:
 │   ├── javamop-extension/               # Maven Surefire extension; built inside the container at step 4a
 │   └── events_encoding_id.txt           # event-ID dictionary used by the trace summarizer
 └── ReproFlake-C9E6/                     # the rest of the artifact — you cd here to run anything
+    ├── {Simulated} Complete Containers Summary.csv # the summary for all the simulated runs, essentially our oracle for data in the report
     ├── Reproducibility Guide.md         # this file
     ├── test_config.csv                  # one row per supported container; consumed by the orchestrator
     ├── Dockerfile, Dockerfile.id,       # base images (JDK 8 / 11 / 17 variants)
@@ -57,6 +58,7 @@ ReproFlake-C9E6/data/
 ├── FULL RUNS: RV/                       # ARCHIVE — pre-recorded LLM responses from the live runs (RV ablation)
 │   └── <container> runs/
 │       ├── summary.csv
+        ├── summary.md
 │       ├── Claude/run 1/Steps Output Files/llm_response_turn1.json …
 │       └── OpenAI/run 1/Steps Output Files/llm_response_turn1.json …
 ├── FULL RUNS: NO RV/                    # ARCHIVE — same shape, no-RV ablation
@@ -116,7 +118,7 @@ or `OPENAI_API_KEY` is needed.
 ### 2.1 Command
 
 ```bash
-cd <cloned-dir>/ReproFlake-C9E6
+cd <this-cloned-dir>/ReproFlake-C9E6
 
 ./TraceMop\ Scripts/simulate_run_pass_at_k.py jnrposixd9f3f84 \
     --rv-traces yes \
@@ -135,7 +137,7 @@ value from `test_config.csv`.
 
 | flag | meaning |
 |---|---|
-| *(positional)* | the `result_container` value from `test_config.csv` |
+| *<result_container>* | the `result_container` value from `test_config.csv` |
 | `--rv-traces yes\|no` | required. `yes` replays from `data/FULL RUNS: RV/` and writes to `data/SIMULATED RUNS: RV/`. `no` uses the no-RV ablation pair. |
 | `--models claude,openai` | comma-separated; default `claude,openai`. Pass either alone to skip the other. |
 | `--runs N` | runs per model. Capped at 2 (the archive holds 2 per model); >2 is clamped with a warning. Default 2. |
@@ -395,6 +397,7 @@ cross-invocation `Complete Containers Summary.csv` is written at the
 ```
 ReproFlake-C9E6/
 ├── Complete Containers Summary.csv               # one row per (model, run); append-only across invocations
+├── Simulated Complete Containers Summary.csv               # one row per (model, run); append-only across invocations in simulated environment
 └── data/
     └── FULL RUNS: RV/                            # "FULL RUNS: NO RV/" when --rv-traces no is used
         └── jnrposixd9f3f84 runs/
@@ -522,7 +525,7 @@ executing so the same container can be reused within the batch. Unless
 container and the scratch `data/<container>/` workspace after the batch has
 been archived.
 
-The complete log of jnrposix:
+The complete log of jnrposix for one particular run. For each run, the whole log can be found in the respective container/model/run folder's pipeline.log file:
 
 ```
 ==========================================
