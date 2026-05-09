@@ -42,6 +42,8 @@ the referenced section.
 19. **TD** - ZOOKEEPER-4327-testRequestThrottler
 20. **TD** - HBASE-27051
 
+In general, OD and NIO containers take around 10-15 mins to complete each execution of {1 container- 2 models- 2 runs per model} combination. ID takes around 30 mins or so. TD takes the longest, about 1 hour. The time is machine-dependent. 
+
 ### 0.2 Clone and Set up the Codebase
 
 > First clone/download the codebase zip
