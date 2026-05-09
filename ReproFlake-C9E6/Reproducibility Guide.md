@@ -29,7 +29,7 @@ cd CS691Project/ReproFlake-C9E6
 ### 0.2 Populate the data archives
 
 Download the OneDrive bundle and place the per-container folders under
-`data/FULL RUNS: RV/` and `data/FULL RUNS: NO RV/` as described in
+`data/FULL_RUNS_RV/` and `data/FULL_RUNS_NO_RV/` as described in
 Section 1.3.
 
 ### 0.3 Create and activate the virtual environment
@@ -75,8 +75,8 @@ Warning: in replay mode, if runs > 2, then it is automatically capped to 2 so on
 ### 0.5 Check the results
 
 ```bash
-cat "data/SIMULATED RUNS: RV/jnrposixd9f3f84 runs/Claude/run 1/Steps Output Files/verify_after_fix.verdict"
-head -5 "data/SIMULATED RUNS: RV/jnrposixd9f3f84 runs/summary.csv"
+cat "data/SIMULATED_RUNS_RV/jnrposixd9f3f84 runs/Claude/run 1/Steps Output Files/verify_after_fix.verdict"
+head -5 "data/SIMULATED_RUNS_RV/jnrposixd9f3f84 runs/summary.csv"
 ```
 
 ---
@@ -130,10 +130,10 @@ ReproFlake-C9E6/data/
 │       ├── Claude/run 1/Steps Output Files/llm_response_turn1.json …
 │       └── OpenAI/run 1/Steps Output Files/llm_response_turn1.json …
 ├── FULL_RUNS_NO_RV/                    # ARCHIVE — same shape, no-RV ablation
-└── SIMULATED_RUNS_RV/, SIMULATED_RUNS_NO_RV/        # OUTPUT  — populated by replay mode; same layout as FULL RUNS
+└── SIMULATED_RUNS_RV/, SIMULATED_RUNS_NO_RV/        # OUTPUT  — populated by replay mode; same layout as FULL_RUNS_*
 ```
 
-The two `FULL RUNS:` archives are the source of truth for replay mode and
+The two `FULL_RUNS_*` archives are the source of truth for replay mode and
 must be present before Section 2 will work. They are NOT in the git repo
 because they total ~2.5 GB; see Section 1.3.
 
@@ -154,7 +154,7 @@ Section 1.2 exactly (for example, the no-RV folder may be named
   `data/FULL_RUNS_NO_RV/<container> runs/...`.
 
 The two destination paths must match Section 1.2 character-for-character
-(spaces and colon included) — the orchestrator looks them up by exact name.
+— the orchestrator looks them up by exact name.
 Live mode (Section 3) does not need this step.
 
 ### 1.4 Why this layout
@@ -171,7 +171,7 @@ Live mode (Section 3) does not need this step.
   `data/` can be excluded wholesale from version control.
 - **`FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/`** are kept as separate
   sibling trees so the two ablation configurations described in the report
-  cannot collide. `SIMULATED RUNS: …/` mirrors that split for replay-mode
+  cannot collide. `SIMULATED_RUNS_*/` mirrors that split for replay-mode
   output.
 
 ---
