@@ -174,43 +174,16 @@ because they total ~2.5 GB; see Section 1.3.
 documented in Section 0.3). It fetches the bundle from Zenodo and places
 `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` under `data/` automatically.
 
-**Manual fallback** (if you'd rather run the steps yourself, or the
-script fails): replicate exactly what the script does. All commands run
-from `ReproFlake-C9E6/` (Section 1.1).
+**Manual Method** (if you'd rather do it yourself):
 
-1. Download the bundle from Zenodo (~1.3 GB):
+1. Open the Zenodo record in a browser and download the zip (~1.3 GB):
+   [zenodo.org/records/20099827](https://zenodo.org/records/20099827?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6IjlhODEwZjgzLWI1ZWEtNDY4ZS1iYjIzLTkzMWEzOWRhNzRkYyIsImRhdGEiOnt9LCJyYW5kb20iOiI1YjJmNjk1ZGM4Y2I1YTBhODI1OTFlYjU3NzUzMDQzNyJ9.SwGk1BCQ9_pyXYx_cPnB8ydG-1B2BoTwi_JwpkoxCobXLkIoIWXvKwzd0ssuQthkU0jubNu7WzYESVU-mUMYAQ)
 
-   ```bash
-   curl -L --fail -o data/.bundle.zip.partial \
-     "https://zenodo.org/records/20099827/files/18_RV_17_NRV.zip?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6IjlhODEwZjgzLWI1ZWEtNDY4ZS1iYjIzLTkzMWEzOWRhNzRkYyIsImRhdGEiOnt9LCJyYW5kb20iOiI1YjJmNjk1ZGM4Y2I1YTBhODI1OTFlYjU3NzUzMDQzNyJ9.SwGk1BCQ9_pyXYx_cPnB8ydG-1B2BoTwi_JwpkoxCobXLkIoIWXvKwzd0ssuQthkU0jubNu7WzYESVU-mUMYAQ&download=1"
-   ```
+2. Unzip it. The archive contains two top-level folders: `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/`.
 
-2. Unzip into a staging directory under `data/`:
+3. Move both folders into `ReproFlake-C9E6/data/`.
 
-   ```bash
-   mkdir -p data/.bundle.staging
-   unzip -q data/.bundle.zip.partial -d data/.bundle.staging
-   ```
-
-3. Move every per-container folder into the right archive directory:
-
-   ```bash
-   mkdir -p data/FULL_RUNS_RV data/FULL_RUNS_NO_RV
-   mv data/.bundle.staging/FULL_RUNS_RV/*    data/FULL_RUNS_RV/
-   mv data/.bundle.staging/FULL_RUNS_NO_RV/* data/FULL_RUNS_NO_RV/
-   ```
-
-4. Mark the archives as extracted (so a subsequent run of the bootstrap
-   script correctly no-ops), and clean up the staging files:
-
-   ```bash
-   touch data/.bundle_extracted
-   rm -rf data/.bundle.staging data/.bundle.zip.partial
-   ```
-
-The destination paths must match Section 1.2 character-for-character -
-the orchestrator looks them up by exact name. Live mode (Section 3) does
-not need this step.
+Live mode (Section 3) does not need this step.
 
 ### 1.4 Why this layout
 
