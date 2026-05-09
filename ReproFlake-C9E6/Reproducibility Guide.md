@@ -65,7 +65,18 @@ cd data
 ../TraceMop\ Scripts/bootstrap_archives.sh
 ```
 
-If for some reason, ```bootstrap_archives.sh``` is not working or taking too long, please refer to section 1.3 for manual way. 
+If for some reason, ```bootstrap_archives.sh``` is not working or taking too long, please refer to this:
+
+**Manual Method**:
+
+1. Open the Zenodo record in a browser and download the zip (~2.4 GB):
+   [zenodo.org/records/20100590](https://zenodo.org/records/20100590)
+
+2. Unzip it. Find `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` inside.
+
+3. Inside `ReproFlake-C9E6/`, create a `data/` folder if it doesn't already exist — a freshly cloned repo has no `data/`.
+
+4. Move both folders (`FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/`) into `ReproFlake-C9E6/data/`.
 
 Zenodo record (clickable for manual browser download, ~2.4 GB):
 [zenodo.org/records/20100590](https://zenodo.org/records/20100590)
