@@ -40,31 +40,31 @@ the referenced section.
 17. **TD** - BOOKKEEPER-846
 18. **TD** - COLLECTIONS-812
 19. **TD** - ZOOKEEPER-4327-testRequestThrottler
-20. **TD** - HBASE-27051 
+20. **TD** - HBASE-27051
 
-### 0.2 Clone and orient
+### 0.2 Clone the Codebase
+
+> First clone the codebase
+> then use the script to automatically unzip our `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` archives into `ReproFlake-C9E6/data/`
+> These two `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` contain all our 20 tested containers, and their logs and each step data. To mimic LLM-responses, our simulation script access data from these folders. 
+> **Replay mode requires the Zenodo bundle.** You **must** download and
+> unzip the `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` archives into `data/`
+> before running the replay (Section 0.4). The bootstrap script below
+> does this for you; if you'd rather download manually, see Section 1.3.
 
 ```bash
 git clone https://anonymous.4open.science/r/CS691Project
 cd CS691Project/ReproFlake-C9E6
-```
-
-### 0.3 Populate the data archives
-
-Run the bootstrap script once. It downloads the bundle (~1.3 GB) from
-Zenodo, unzips, and places `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` under
-`data/`:
-
-```bash
 ./TraceMop\ Scripts/bootstrap_archives.sh
 ```
 
-Idempotent - re-running is a no-op once the archives are extracted. To
-force re-fetch, delete `data/.bundle_extracted`.
+Zenodo record (clickable for manual browser download, ~1.3 GB):
+[zenodo.org/records/20099827](https://zenodo.org/records/20099827?token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6IjlhODEwZjgzLWI1ZWEtNDY4ZS1iYjIzLTkzMWEzOWRhNzRkYyIsImRhdGEiOnt9LCJyYW5kb20iOiI1YjJmNjk1ZGM4Y2I1YTBhODI1OTFlYjU3NzUzMDQzNyJ9.SwGk1BCQ9_pyXYx_cPnB8ydG-1B2BoTwi_JwpkoxCobXLkIoIWXvKwzd0ssuQthkU0jubNu7WzYESVU-mUMYAQ)
 
-Manual fallback (if the Zenodo download fails): see Section 1.3.
+The bootstrap is idempotent — re-running is a no-op once the archives
+are extracted. To force re-fetch, delete `data/.bundle_extracted`.
 
-### 0.4 Create and activate the virtual environment
+### 0.3 Create and activate the virtual environment
 
 Replay mode needs no third-party packages - skip `pip install`.
 
@@ -94,7 +94,7 @@ python3 -m venv ~/.venvs/reproflake
 source ~/.venvs/reproflake/bin/activate
 ```
 
-### 0.5 Run the replay
+### 0.4 Run the replay
 
 ```bash
 ./TraceMop\ Scripts/simulate_run_pass_at_k.py jnrposixd9f3f84 \
@@ -102,9 +102,9 @@ source ~/.venvs/reproflake/bin/activate
     --models claude,openai \
     --runs 2
 ```
-Warning: in replay mode, if runs > 2, then it is automatically capped to 2 so only 2 runs per container-model combo is generated. 
+Warning: in replay mode, if runs > 2, then it is automatically capped to 2 (as our real data has at most 2 runs per container/model) so only 2 runs per container-model combo is generated. 
 
-### 0.6 Check the results
+### 0.5 Check the results
 
 ```bash
 cat "data/SIMULATED_RUNS_RV/jnrposixd9f3f84 runs/Claude/run 1/Steps Output Files/verify_after_fix.verdict"
@@ -171,7 +171,7 @@ because they total ~2.5 GB; see Section 1.3.
 ### 1.3 Populating the archives
 
 **Recommended:** run the bootstrap script (`./TraceMop\ Scripts/bootstrap_archives.sh`,
-documented in Section 0.3). It fetches the bundle from Zenodo and places
+documented in Section 0.2). It fetches the bundle from Zenodo and places
 `FULL_RUNS_RV/` and `FULL_RUNS_NO_RV/` under `data/` automatically.
 
 **Manual Method** (if you'd rather do it yourself):
