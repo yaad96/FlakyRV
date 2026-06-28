@@ -12,8 +12,10 @@ Each type folder contains one subfolder per container, each with:
   - metadata.json
   - summary.csv (one row for every selected container of that type)
 
-If a run's Fixed.patch is missing or empty, the script tries to generate a
-unified diff between that run's Flaky/ and Fixed/ directories.
+Patches are collected from the agent's submitted LLM response only. Fixed.patch
+is intentionally ignored because it can contain the developer/reference fix.
+The final.patch file stores the submitted unified diff first, followed by the
+submitted fixed_code fallback JSON when present.
 """
 
 from __future__ import annotations
@@ -185,6 +187,15 @@ def build_tree_patch(flaky_dir: Path, fixed_dir: Path, output_patch: Path) -> bo
     return True
 
 
+def fixed_code_from_value(value: object) -> list[object]:
+    if not isinstance(value, dict):
+        return []
+    fixed_code = value.get("fixed_code")
+    if isinstance(fixed_code, list):
+        return fixed_code
+    return []
+
+
 def extract_llm_response_patch(run_dir: Path, output_patch: Path) -> bool:
     response_path = run_dir / "Steps_Output_Files" / "llm_response.json"
     if not response_path.is_file():
@@ -196,25 +207,45 @@ def extract_llm_response_patch(run_dir: Path, output_patch: Path) -> bool:
         return False
 
     patch_text = ""
+    fixed_code: list[object] = []
     raw_response = response.get("raw_response")
     if isinstance(raw_response, str):
         try:
             raw_data = json.loads(raw_response)
-            patch_text = raw_data.get("patch", "")
+            if isinstance(raw_data, dict):
+                patch_value = raw_data.get("patch", "")
+                if isinstance(patch_value, str):
+                    patch_text = patch_value
+                fixed_code = fixed_code_from_value(raw_data)
         except json.JSONDecodeError:
             patch_text = ""
 
-    if not patch_text and isinstance(response.get("response"), dict):
+    response_outputs = response.get("response")
+    if isinstance(response_outputs, dict):
         for value in response["response"].values():
-            if isinstance(value, dict) and isinstance(value.get("patch"), str):
+            if not isinstance(value, dict):
+                continue
+            if not patch_text and isinstance(value.get("patch"), str):
                 patch_text = value["patch"]
-                break
+            if not fixed_code:
+                fixed_code = fixed_code_from_value(value)
 
-    if not patch_text.strip():
+    if not patch_text.strip() and not fixed_code:
         return False
 
+    if patch_text.strip():
+        output_text = patch_text.rstrip() + "\n"
+    else:
+        output_text = "# --- NO_AGENT_SUBMITTED_UNIFIED_DIFF ---\n"
+    if fixed_code:
+        output_text += (
+            "\n"
+            "# --- AGENT_SUBMITTED_FIXED_CODE_JSON ---\n"
+            f"{json.dumps(fixed_code, indent=2, sort_keys=True)}\n"
+        )
+
     output_patch.parent.mkdir(parents=True, exist_ok=True)
-    output_patch.write_text(patch_text.rstrip() + "\n", errors="replace")
+    output_patch.write_text(output_text, errors="replace")
     return True
 
 
@@ -264,14 +295,6 @@ def collect_tool_usage(run_dir: Path) -> Counter[str]:
 
 
 def patch_for_run(run_dir: Path, temp_dir: Path) -> tuple[Path | None, str]:
-    fixed_patch = run_dir / "Fixed.patch"
-    if has_content(fixed_patch):
-        return fixed_patch, "Fixed.patch"
-
-    generated_patch = temp_dir / f"{run_dir.parent.parent.name}_{run_dir.parent.name}_{run_dir.name}.patch"
-    if build_tree_patch(run_dir / "Flaky", run_dir / "Fixed", generated_patch):
-        return generated_patch, "generated_tree_diff"
-
     submitted_patch = temp_dir / f"{run_dir.parent.parent.name}_{run_dir.parent.name}_{run_dir.name}_llm_response.patch"
     if extract_llm_response_patch(run_dir, submitted_patch):
         return submitted_patch, "llm_response_patch"

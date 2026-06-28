@@ -678,29 +678,6 @@ TOOL_SCHEMAS = [
             },
         },
     },
-    {
-        "name": "get_rv_trace_diff",
-        "description": (
-            "Return the decoded TraceMOP trace-diff summary: flaky-only "
-            "traces, passing-only traces, frequency differences, and "
-            "source-location mismatches between the failing and clean "
-            "runs. Optional: useful when source code alone doesn't pin "
-            "down the pollution site, can be skipped when other evidence "
-            "is already conclusive."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "test_name": {
-                    "type": "string",
-                    "description": (
-                        "Accepted for symmetry with get_test_code; there "
-                        "is only one trace summary per container."
-                    ),
-                },
-            },
-        },
-    },
 ]
 
 
@@ -727,7 +704,6 @@ def dispatch_tool(container: str, name: str, arguments: dict) -> str:
         if name == "get_rv_trace_diff":
             return get_rv_trace_diff(container, arguments.get("test_name"))
         return (f"(unknown tool '{name}'. Available: get_test_code, get_code, "
-                f"get_error_logs, get_flaky_example, get_rv_trace_diff, "
-                f"submit_patch.)")
+                f"get_error_logs, get_flaky_example, submit_patch.)")
     except Exception as exc:  # noqa: BLE001
         return f"(tool {name} raised {type(exc).__name__}: {exc})"

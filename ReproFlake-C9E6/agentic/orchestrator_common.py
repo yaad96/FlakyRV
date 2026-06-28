@@ -352,8 +352,6 @@ def restrategy_hint(category: str) -> str:
         "test_failed": (
             "Re-strategize: the test still fails after the patch.\n"
             "  • The error log above shows what assertion or exception is still triggered.\n"
-            "  • Consider whether you have the right root cause — use get_rv_trace_diff "
-            "for runtime evidence.\n"
             "  • Check for shared state that is NOT reset by your fix.\n"
             "  • Ensure your cleanup/init targets the correct lifecycle method "
             "(@Before vs @BeforeClass, @After vs @AfterClass)."
@@ -364,13 +362,12 @@ def restrategy_hint(category: str) -> str:
             "  • A race condition or ordering sensitivity may remain.\n"
             "  • Strengthen the cleanup: reset ALL shared state, not just the obvious fields.\n"
             "  • Consider whether @BeforeClass / @AfterClass scope is needed instead of "
-            "@Before / @After.\n"
-            "  • Use get_rv_trace_diff to look for spec violations that differ between runs."
+            "@Before / @After."
         ),
     }
     hint = hints.get(category, (
         "Re-strategize: request more context with get_test_code, get_code, or "
-        "get_rv_trace_diff before submitting the next patch."
+        "get_error_logs before submitting the next patch."
     ))
     return f"\n=== RE-STRATEGIZE ===\n{hint}\n"
 

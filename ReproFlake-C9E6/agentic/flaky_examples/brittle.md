@@ -22,7 +22,6 @@ The reproduction command runs polluter immediately before victim in the same JVM
      between test classes when the polluter shuts them down non-cleanly
 3. Use `get_code` to inspect production classes that the victim instantiates or
    calls — the pollution often lives in production code, not the test itself.
-4. Call `get_rv_trace_diff` if you need runtime evidence of which spec was violated.
 
 ## Fix strategies
 

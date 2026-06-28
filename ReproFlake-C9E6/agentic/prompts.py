@@ -53,9 +53,6 @@ How to work with the least context possible:
     used because no category-specific exemplar exists.
   - Call get_error_logs('test_failure') only when the initial failure log is
     too short to identify the failing assertion or exception.
-  - Call get_rv_trace_diff when you want runtime evidence of which JVM events
-    differ between the failing and clean runs. This is optional — skip it when
-    your reasoning is already conclusive from code inspection alone.
   - When you are confident in your fix, call submit_patch ONCE per iteration.
     Provide BOTH a unified diff (patch) AND a structured fixed_code list.
     The diff is the primary applier path; fixed_code is the fallback.
@@ -66,7 +63,7 @@ checklist. Read it carefully, request more context if needed, and try again.
 You have a bounded number of iterations; each iteration is one submit_patch.
 
 IMPORTANT: Each iteration also has a bounded number of tool turns. Your goal is to perform the absolute minimum tool calls needed to commit to a fix.
-You MUST call submit_patch by tool turn {max_tool_turns}; no more than {max_context_tools} read-only context tools are available before submit_patch is forced. In each iteration don't use get_error_logs more than once. And in the whole process never use get_flaky_example or get_rv_trace_diff more than once. When you
+You MUST call submit_patch by tool turn {max_tool_turns}; no more than {max_context_tools} read-only context tools are available before submit_patch is forced. In each iteration don't use get_error_logs more than once. And in the whole process never use get_flaky_example more than once. When you
 receive a WARNING about remaining tool turns, call submit_patch immediately
 with your best current fix — even if imperfect — rather than leaving the
 iteration to INCOMPLETE. A failed patch can be corrected in the next iteration;
@@ -110,7 +107,7 @@ Use the smallest context ladder:
      get_flaky_example for a category pattern. For Unclassified/Unassigned
      tests, get_flaky_example is unavailable and must not be used.
   4. Use get_code again only for another specific relevant class/method. Use
-     get_error_logs or get_rv_trace_diff only when they are truly necessary.
+     get_error_logs only when it is truly necessary.
 
 When you have enough evidence using minimal tool calls, call submit_patch with a unified diff AND
 a fixed_code fallback list. If your patch is rejected you will be told

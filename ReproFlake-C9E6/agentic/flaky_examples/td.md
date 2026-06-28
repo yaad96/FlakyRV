@@ -20,9 +20,6 @@ state transition, not merely to wait longer.
 2. Pull the failure with `get_error_logs('test_failure')`. The exception
    line + the assertion message often name the racy quantity directly
    (e.g., "expected 5 events but got 4").
-3. `get_rv_trace_diff` is sometimes empty for pure-data races but can
-   highlight collection ops that happen with different frequencies
-   between passing and failing runs.
 
 ## Fix strategies (pick the smallest)
 

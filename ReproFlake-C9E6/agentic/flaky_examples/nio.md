@@ -17,11 +17,6 @@ invocations of itself within one process.
    - Files at a fixed path
 2. Trace the read side: `get_code` the production methods the test
    calls; check if any of them maintain in-process state across calls.
-3. `get_rv_trace_diff` is highest-leverage for NIO when the bug is
-   driven by control-flow pollution (e.g., `static List` accumulation
-   shows up as different `Collection.add`/`.clear` event counts). It is
-   often empty for primitive pollution (`static int counter`); in that
-   case fall back to source review.
 
 ## Fix strategies (pick the smallest)
 

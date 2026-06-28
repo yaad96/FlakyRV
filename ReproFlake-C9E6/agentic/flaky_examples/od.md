@@ -21,10 +21,6 @@ file, cache, etc.); the victim assumes the un-polluted state.
    classes named in the stack trace). Many OD bugs sit in production
    code that *trusts* a piece of shared state to be in a clean
    initial shape.
-4. If the source alone doesn't pin down the pollution site, call
-   `get_rv_trace_diff` — TraceMOP often reports the exact spec that names
-   which contract is being violated.
-
 ## Fix strategies (pick the smallest)
 
 - **Cleanup in the polluter** — `@After`/`@AfterEach` that restores the
