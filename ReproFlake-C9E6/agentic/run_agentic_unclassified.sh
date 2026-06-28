@@ -2,9 +2,8 @@
 # ============================================================
 # run_agentic_unclassified.sh — agentic repair for Unclassified tests
 #
-# For tests with no known flaky-test category the pipeline cannot run
-# TraceMOP trace comparison (there is no "correct" variant to compare
-# against) and cannot offer category-specific exemplars to the agent.
+# For tests with no known flaky-test category the pipeline cannot offer
+# category-specific exemplars to the agent.
 #
 # What this script does instead:
 #   1.  unzip + Fixed.patch (evaluation scaffold only)
@@ -179,22 +178,6 @@ echo "[step 9.5] snapshotting Flaky/ -> Flaky.pristine"
 rm -rf "$DATA_DIR/Flaky.pristine"
 cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Flaky.pristine"
 
-echo "[step 9.5] Writing trace_config.json"
-cat > "$STEPS_OUT_DIR/trace_config.json" <<JSONEOF
-{
-  "docker_container": "$CONTAINER",
-  "test_type": "unclassified",
-  "module": "$MODULE",
-  "polluter": "",
-  "victim": "$VICTIM",
-  "nondex_seed": "",
-  "nondex_runs": 0,
-  "wrapper_fqcn": "",
-  "surefire_version": "",
-  "tracemop_ready": false
-}
-JSONEOF
-
 # AGENT — exclude get_flaky_example because no category is known.
 echo "[agent ] launching agentic_orchestrator.py (max_iterations=${AGENTIC_MAX_ITERATIONS:-10})"
 set +e
@@ -213,7 +196,7 @@ fi
 echo
 echo "=========================================="
 echo "[AGENTIC UNCLASSIFIED] Done."
-for f in run_summary.csv trace_config.json llm_context.txt llm_response.json apply_report.json \
+for f in run_summary.csv llm_context.txt llm_response.json apply_report.json \
          verify_after_fix.log verify_after_fix.verdict \
          agentic_conversation.json agentic_iterations.jsonl; do
   if [[ -f "$STEPS_OUT_DIR/$f" ]]; then

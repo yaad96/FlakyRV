@@ -2,11 +2,9 @@
 # ============================================================
 # run_agentic_nio.sh — agentic NIO repair pipeline
 #
-# Mirrors run_nio_tracemop.sh's setup (steps 1-7 plus the auto-generated
-# JUnit wrapper that re-invokes the victim twice in one JVM) but replaces
-# steps 8-11 with a call to agentic_orchestrator.py. The orchestrator then
-# iterates through context tools and submit_patch attempts up to a bounded
-# limit, using the wrapper-based verify command provided by agentic_verify.py.
+# Agentic NIO repair pipeline. It generates a JUnit wrapper that re-invokes
+# the victim twice in one JVM, then the orchestrator iterates through context
+# tools and submit_patch attempts up to a bounded limit.
 #
 # Usage:  ./run_agentic_nio.sh <result_container>
 # Requires: ANTHROPIC_API_KEY + pip install anthropic
@@ -22,19 +20,11 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPROFLAKE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VALG_DIR="$(cd "$REPROFLAKE_DIR/.." && pwd)"
-TRACEMOP_SCRIPTS="$REPROFLAKE_DIR/TraceMop Scripts"
 LLM_SCRIPTS="$REPROFLAKE_DIR/LLM Scripts"
 
 DATA_DIR="$REPROFLAKE_DIR/data/$RESULT_CONTAINER"
 STEPS_OUT_DIR="$DATA_DIR/Steps_Output_Files"
 CSV="$REPROFLAKE_DIR/test_config.csv"
-
-TRACEMOP_JAR="$VALG_DIR/experiments/tracemop.jar"
-EXT_SRC_DIR="$VALG_DIR/scripts/javamop-extension"
-EVENTS_FILE="$VALG_DIR/scripts/events_encoding_id.txt"
-COMPARE_TRACES_LOCAL="$TRACEMOP_SCRIPTS/compare-traces-official.py"
-COMPARE_TRACES_URL="https://raw.githubusercontent.com/SoftEngResearch/tracemop/master/scripts/compare-traces.py"
 
 [[ -f "$CSV" ]] || { echo "ERROR: $CSV not found"; exit 1; }
 ROW=$(awk -F',' -v rc="$RESULT_CONTAINER" '$2 == rc { print; exit }' "$CSV")
@@ -48,7 +38,7 @@ if [[ -z "$VICTIM" ]]; then
   echo "ERROR: NIO container '$RESULT_CONTAINER' must have a victim test in CSV."; exit 1
 fi
 
-# Derive wrapper identifiers exactly the way run_nio_tracemop.sh does.
+# Derive wrapper identifiers for the generated NIO repro driver.
 VICTIM_CLASS_FULL="${VICTIM%#*}"
 VICTIM_METHOD="${VICTIM##*#}"
 VICTIM_CLASS_SIMPLE="${VICTIM_CLASS_FULL##*.}"
@@ -159,7 +149,7 @@ if ! grep -qwF "$VICTIM_METHOD" "$VICTIM_FILE_ABS"; then
 fi
 
 # Detect surefire version pinned by the project (single-property resolution
-# only — sufficient for the agentic case, matches run_nio_tracemop.sh's logic
+# only — sufficient for the agentic case and common project layouts.
 # for the common case).
 SUREFIRE_VER=$(awk '
   /<plugin>/,/<\/plugin>/ {
@@ -198,21 +188,6 @@ docker run -d "${DOCKER_PLATFORM_ARGS[@]}" --name "$CONTAINER" \
   --mount type=bind,source="$DATA_DIR/Flakym2/.m2",target=/root/.m2 \
   "$IMAGE" tail -f /dev/null >/dev/null
 
-# STEPS 3 + 4a + 4b — TraceMOP
-echo "[step 3 ] Copying tracemop.jar"
-docker cp "$TRACEMOP_JAR" "$CONTAINER:/tmp/tracemop.jar"
-
-echo "[step 4a] Building javamop-extension"
-docker exec "$CONTAINER" mkdir -p /tmp/ext-build
-docker cp "$EXT_SRC_DIR/pom.xml" "$CONTAINER:/tmp/ext-build/pom.xml"
-docker cp "$EXT_SRC_DIR/src"     "$CONTAINER:/tmp/ext-build/src"
-docker exec "$CONTAINER" bash -c "cd /tmp/ext-build && mvn package -DskipTests -q"
-
-echo "[step 4b] Installing tracemop.jar"
-docker exec "$CONTAINER" bash -c "mvn install:install-file \
-  -Dfile=/tmp/tracemop.jar -DgroupId=javamop-agent \
-  -DartifactId=javamop-agent -Dversion=1.0 -Dpackaging=jar -q"
-
 # STEP 4c — generate wrapper class in BOTH Fixed/ and Flaky/
 echo "[step 4c] Generating NIO wrapper at $WRAPPER_PATH_REL"
 gen_wrapper() {
@@ -247,12 +222,10 @@ EOF
 gen_wrapper "$DATA_DIR/Fixed"
 gen_wrapper "$DATA_DIR/Flaky"
 
-# STEP 4d — Run Fixed+wrapper and Flaky+wrapper to capture logs (no TraceMOP)
-# TraceMOP traces are computed on demand via get_rv_trace_diff.
-EXT_JAR=/tmp/ext-build/target/javamop-extension-1.0.jar
+# STEP 4d — Run Fixed+wrapper and Flaky+wrapper to capture logs
 MVNOPTS='-Ddependency-check.skip=true -Dgpg.skip=true -DfailIfNoTests=false -Dskip.installnodenpm -Dskip.npm -Dskip.yarn -Dlicense.skip -Dcheckstyle.skip -Drat.skip -Denforcer.skip -Danimal.sniffer.skip -Dmaven.javadoc.skip -Dwarbucks.skip -Dmodernizer.skip -Dimpsort.skip -Dmdep.analyze.skip -Dpgpverify.skip -Dxml.skip -Dcobertura.skip=true -Dfindbugs.skip=true -Dspotless.skip=true -Dspotless.check.skip=true -Dossindex.skip=true -Dmaven.bundle.plugin.skip=true -Dmaven.parallel.force=false'
 
-echo "[step 4d] /app/work/Fixed + wrapper -> /app/work/traces-fixed (sanity; no TraceMOP)"
+echo "[step 4d] /app/work/Fixed + wrapper -> /app/work/traces-fixed (sanity)"
 docker exec "$CONTAINER" bash -c "
   set -e
   rm -rf /app/work/traces-fixed; mkdir -p /app/work/traces-fixed
@@ -265,7 +238,7 @@ docker exec "$CONTAINER" bash -c "
     $MVNOPTS 2>&1 | tee /app/work/traces-fixed/mvn.log || true
 "
 
-echo "[step 4d] /app/work/Flaky + wrapper -> /app/work/traces-flaky (failure log; no TraceMOP)"
+echo "[step 4d] /app/work/Flaky + wrapper -> /app/work/traces-flaky (failure log)"
 docker exec "$CONTAINER" bash -c "
   set -e
   rm -rf /app/work/traces-flaky; mkdir -p /app/work/traces-flaky
@@ -302,17 +275,6 @@ if (( KT < 1 || KF + KE < 1 )); then
 fi
 echo "[sanity ] OK — Fixed passed, Flaky failed (NIO reproduced)"
 
-# STEP 5 — copy trace-comparison tooling (used by lazy get_rv_trace_diff)
-echo "[step 5 ] Preparing trace-comparison tooling"
-if [[ ! -f "$COMPARE_TRACES_LOCAL" ]]; then
-  if   command -v curl >/dev/null; then curl -fsSL "$COMPARE_TRACES_URL" -o "$COMPARE_TRACES_LOCAL"
-  elif command -v wget >/dev/null; then wget -q "$COMPARE_TRACES_URL" -O "$COMPARE_TRACES_LOCAL"
-  else echo "ERROR: need curl or wget"; exit 1; fi
-fi
-python3 "$LLM_SCRIPTS/patch_compare.py" "$COMPARE_TRACES_LOCAL" >/dev/null
-docker cp "$COMPARE_TRACES_LOCAL"          "$CONTAINER:/tmp/compare-traces-official.py"
-docker cp "$EVENTS_FILE"                   "$CONTAINER:/tmp/events_encoding_id.txt"
-
 mkdir -p "$STEPS_OUT_DIR"
 
 # STEP 9.5 — snapshot
@@ -320,24 +282,8 @@ echo "[step 9.5] snapshotting Flaky/ -> Flaky.pristine"
 rm -rf "$DATA_DIR/Flaky.pristine"
 cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Flaky.pristine"
 
-echo "[step 9.5] Writing trace_config.json"
-cat > "$STEPS_OUT_DIR/trace_config.json" <<JSONEOF
-{
-  "docker_container": "$CONTAINER",
-  "test_type": "nio",
-  "module": "$MODULE",
-  "polluter": "",
-  "victim": "$VICTIM",
-  "nondex_seed": "",
-  "nondex_runs": 0,
-  "wrapper_fqcn": "$WRAPPER_FQCN",
-  "surefire_version": "$SUREFIRE_VER",
-  "tracemop_ready": true
-}
-JSONEOF
-
 # AGENT — verify_victim for NIO needs WRAPPER_FQCN + SUREFIRE_VER in env;
-# agentic_verify.py reads them, mirroring run_nio_tracemop.sh's verify_victim().
+# agentic_verify.py reads them for wrapper-based verification.
 export WRAPPER_FQCN SUREFIRE_VER
 echo "[agent ] launching agentic_orchestrator.py (max_iterations=${AGENTIC_MAX_ITERATIONS:-10})"
 set +e
@@ -355,7 +301,7 @@ fi
 echo
 echo "=========================================="
 echo "[AGENTIC NIO] Done."
-for f in run_summary.csv trace_config.json rv_trace_diff.log llm_trace_summary.txt llm_context.txt \
+for f in run_summary.csv llm_context.txt \
          llm_response.json apply_report.json verify_after_fix.log \
          verify_after_fix.verdict agentic_conversation.json \
          agentic_iterations.jsonl; do
