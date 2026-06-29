@@ -100,9 +100,9 @@ if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
   fi
 fi
 
-# STEP 1 — unzip + Fixed.patch
+# STEP 1 — unzip flaky source
 need_step1=0
-for d in Fixed Flaky Flakym2; do [[ -d "$DATA_DIR/$d" ]] || need_step1=1; done
+for d in Flaky Flakym2; do [[ -d "$DATA_DIR/$d" ]] || need_step1=1; done
 if (( need_step1 )); then
   ZIP_PATH="$REPROFLAKE_DIR/data/${ZIP}.zip"
   if [[ ! -f "$ZIP_PATH" ]]; then
@@ -119,12 +119,6 @@ if (( need_step1 )); then
       mv "$DATA_DIR/$ZIP/"* "$DATA_DIR/" 2>/dev/null || true
       rmdir "$DATA_DIR/$ZIP" 2>/dev/null || true
     fi
-  fi
-  if [[ ! -d "$DATA_DIR/Fixed" ]]; then
-    [[ -f "$DATA_DIR/Fixed.patch" ]] || { echo "ERROR: $DATA_DIR/Fixed.patch missing"; exit 1; }
-    echo "[step 1b] Creating Fixed/ = Flaky/ + Fixed.patch (evaluation only)"
-    cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Fixed"
-    patch -p1 -d "$DATA_DIR/Fixed" < "$DATA_DIR/Fixed.patch" >/dev/null
   fi
 fi
 
@@ -162,61 +156,20 @@ docker exec "$CONTAINER" bash -c "
   mvn install $PREBUILD_SKIP_ARG $PREBUILD_TARGET_ARGS -q $MVNOPTS
 "
 
-# Run #1: traces-pass (plain mvn test)
-echo "[step 4d] /app/work/Flaky -> /app/work/traces-pass"
-docker exec "$CONTAINER" bash -c "
-  set -e
-  rm -rf /app/work/traces-pass; mkdir -p /app/work/traces-pass
-  cd /app/work/Flaky
-  mvn test \
-    -pl '$MODULE' -Dtest='$VICTIM' \
-    $MVNOPTS 2>&1 | tee /app/work/traces-pass/mvn.log || true
-"
-
-# Run #2: traces-fail (NonDex with seed; captures failure log)
+# Run failing NonDex variant only; captures failure log.
 echo "[step 4d] /app/work/Flaky -> /app/work/traces-fail (NonDex seed=$NONDEXSEED max-runs=$NONDEX_RUNS)"
 docker exec "$CONTAINER" bash -c "
   set -e
   rm -rf /app/work/traces-fail; mkdir -p /app/work/traces-fail
   cd /app/work/Flaky
-  : > /app/work/traces-fail/mvn.log
-  python3 - <<'PY' > /app/work/traces-fail/seeds.txt
-seed = int('$NONDEXSEED')
-mask = (1 << 48) - 1
-mult = 0x5DEECE66D
-add = 0xB
-state = (seed ^ mult) & mask
-print(seed)
-for _ in range(1, int('$NONDEX_RUNS')):
-    state = (state * mult + add) & mask
-    hi = state >> 16
-    state = (state * mult + add) & mask
-    lo = state >> 16
-    val = (hi << 32) + lo
-    if val >= (1 << 63):
-        val -= 1 << 64
-    print(val)
-PY
-  i=0
-  while IFS= read -r seed; do
-    i=\$((i + 1))
-    echo \"[nondex] attempt \$i/$NONDEX_RUNS seed=\$seed\" | tee -a /app/work/traces-fail/mvn.log
-    mvn edu.illinois:nondex-maven-plugin:$NONDEX_PLUGIN_VERSION:nondex \
-      -DnondexSeed=\$seed -DnondexRuns=1 \
-      -pl '$MODULE' -Dtest='$VICTIM' \
-      $MVNOPTS 2>&1 | tee -a /app/work/traces-fail/mvn.log || true
-    if tail -n 200 /app/work/traces-fail/mvn.log | grep -Eq 'Tests run:[[:space:]]+[0-9]+,[[:space:]]+Failures:[[:space:]]+[1-9][0-9]*|Tests run:[[:space:]]+[0-9]+,[[:space:]]+Failures:[[:space:]]+[0-9]+,[[:space:]]+Errors:[[:space:]]+[1-9][0-9]*'; then
-      echo \"\$seed\" > /app/work/traces-fail/failing_seed
-      break
-    fi
-  done < /app/work/traces-fail/seeds.txt
+  mvn edu.illinois:nondex-maven-plugin:$NONDEX_PLUGIN_VERSION:nondex \
+    -DnondexSeed=$NONDEXSEED -DnondexRuns=$NONDEX_RUNS \
+    -pl '$MODULE' -Dtest='$VICTIM' \
+    $MVNOPTS 2>&1 | tee /app/work/traces-fail/mvn.log || true
+  grep 'nondexSeed=' /app/work/traces-fail/mvn.log \
+    | sed -E 's/.*nondexSeed=([^[:space:]]+).*/\1/' \
+    | awk '!seen[\$0]++' > /app/work/traces-fail/seeds.txt || true
 "
-
-if [[ -f "$DATA_DIR/traces-fail/failing_seed" ]]; then
-  NONDEXSEED="$(cat "$DATA_DIR/traces-fail/failing_seed")"
-  NONDEX_RUNS=1
-  echo "[step 4d] using reproduced failing NonDex seed=$NONDEXSEED"
-fi
 
 # Sanity: at least one NonDex iteration must have failed.
 echo "[sanity ] Verifying at least one NonDex iteration failed"

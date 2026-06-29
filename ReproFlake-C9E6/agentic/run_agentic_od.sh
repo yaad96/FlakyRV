@@ -122,10 +122,10 @@ if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
 fi
 
 # ============================================================
-# STEP 1 — unzip + apply Fixed.patch
+# STEP 1 — unzip flaky source
 # ============================================================
 need_step1=0
-for d in Fixed Flaky Flakym2; do
+for d in Flaky Flakym2; do
   [[ -d "$DATA_DIR/$d" ]] || need_step1=1
 done
 
@@ -149,14 +149,8 @@ if (( need_step1 )); then
       rmdir "$DATA_DIR/$ZIP" 2>/dev/null || true
     fi
   fi
-  if [[ ! -d "$DATA_DIR/Fixed" ]]; then
-    [[ -f "$DATA_DIR/Fixed.patch" ]] || { echo "ERROR: $DATA_DIR/Fixed.patch missing"; exit 1; }
-    echo "[step 1b] Creating Fixed/ = Flaky/ + Fixed.patch"
-    cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Fixed"
-    patch -p1 -d "$DATA_DIR/Fixed" < "$DATA_DIR/Fixed.patch" >/dev/null
-  fi
 else
-  echo "[step 1c] Fixed/, Flaky/, Flakym2/ already present — skipping unzip."
+  echo "[step 1c] Flaky/, Flakym2/ already present — skipping unzip."
 fi
 
 # ============================================================
@@ -180,7 +174,8 @@ docker exec "$CONTAINER" bash -c "
   set -e
   rm -rf /app/work/traces-flaky; mkdir -p /app/work/traces-flaky
   cd /app/work/Flaky
-  mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
+  mvn install -DskipTests -pl $MODULE -am -q $MVNOPTS || \
+    mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
   mvn surefire:test \
     -pl $MODULE -Dtest='$POLLUTER,$VICTIM' \
     -Dsurefire.runOrder=testorder \

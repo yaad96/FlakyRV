@@ -109,9 +109,9 @@ if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
   fi
 fi
 
-# STEP 1 — unzip + Fixed.patch
+# STEP 1 — unzip flaky source
 need_step1=0
-for d in Fixed Flaky Flakym2; do [[ -d "$DATA_DIR/$d" ]] || need_step1=1; done
+for d in Flaky Flakym2; do [[ -d "$DATA_DIR/$d" ]] || need_step1=1; done
 if (( need_step1 )); then
   ZIP_PATH="$REPROFLAKE_DIR/data/${ZIP}.zip"
   if [[ ! -f "$ZIP_PATH" ]]; then
@@ -130,17 +130,11 @@ if (( need_step1 )); then
       rmdir "$DATA_DIR/$ZIP" 2>/dev/null || true
     fi
   fi
-  if [[ ! -d "$DATA_DIR/Fixed" ]]; then
-    [[ -f "$DATA_DIR/Fixed.patch" ]] || { echo "ERROR: $DATA_DIR/Fixed.patch missing"; exit 1; }
-    echo "[step 1b] Creating Fixed/ = Flaky/ + Fixed.patch"
-    cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Fixed"
-    patch -p1 -d "$DATA_DIR/Fixed" < "$DATA_DIR/Fixed.patch" >/dev/null
-  fi
 fi
 
 # Preflight: victim method must exist in resolved source.
 VICTIM_FILE_REL="${MODULE}/src/test/java/${VICTIM_PKG_PATH}/${VICTIM_CLASS_SIMPLE}.java"
-VICTIM_FILE_ABS="$DATA_DIR/Fixed/$VICTIM_FILE_REL"
+VICTIM_FILE_ABS="$DATA_DIR/Flaky/$VICTIM_FILE_REL"
 if [[ ! -f "$VICTIM_FILE_ABS" ]]; then
   echo "ERROR: victim source file not found at $VICTIM_FILE_REL"; exit 1
 fi
@@ -188,7 +182,7 @@ docker run -d "${DOCKER_PLATFORM_ARGS[@]}" --name "$CONTAINER" \
   --mount type=bind,source="$DATA_DIR/Flakym2/.m2",target=/root/.m2 \
   "$IMAGE" tail -f /dev/null >/dev/null
 
-# STEP 4c — generate wrapper class in BOTH Fixed/ and Flaky/
+# STEP 4c — generate wrapper class in Flaky/
 echo "[step 4c] Generating NIO wrapper at $WRAPPER_PATH_REL"
 gen_wrapper() {
   local root="$1"
@@ -219,24 +213,10 @@ public class ${WRAPPER_CLASS_SIMPLE} {
 }
 EOF
 }
-gen_wrapper "$DATA_DIR/Fixed"
 gen_wrapper "$DATA_DIR/Flaky"
 
-# STEP 4d — Run Fixed+wrapper and Flaky+wrapper to capture logs
+# STEP 4d — Run Flaky+wrapper to capture failure log
 MVNOPTS='-Ddependency-check.skip=true -Dgpg.skip=true -DfailIfNoTests=false -Dskip.installnodenpm -Dskip.npm -Dskip.yarn -Dlicense.skip -Dcheckstyle.skip -Drat.skip -Denforcer.skip -Danimal.sniffer.skip -Dmaven.javadoc.skip -Dwarbucks.skip -Dmodernizer.skip -Dimpsort.skip -Dmdep.analyze.skip -Dpgpverify.skip -Dxml.skip -Dcobertura.skip=true -Dfindbugs.skip=true -Dspotless.skip=true -Dspotless.check.skip=true -Dossindex.skip=true -Dmaven.bundle.plugin.skip=true -Dmaven.parallel.force=false'
-
-echo "[step 4d] /app/work/Fixed + wrapper -> /app/work/traces-fixed (sanity)"
-docker exec "$CONTAINER" bash -c "
-  set -e
-  rm -rf /app/work/traces-fixed; mkdir -p /app/work/traces-fixed
-  export SUREFIRE_VERSION=$SUREFIRE_VER
-  cd /app/work/Fixed
-  mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
-  mvn test \
-    -pl $MODULE -am \
-    -Dtest='${WRAPPER_FQCN}#runTwice' \
-    $MVNOPTS 2>&1 | tee /app/work/traces-fixed/mvn.log || true
-"
 
 echo "[step 4d] /app/work/Flaky + wrapper -> /app/work/traces-flaky (failure log)"
 docker exec "$CONTAINER" bash -c "
@@ -251,7 +231,7 @@ docker exec "$CONTAINER" bash -c "
     $MVNOPTS 2>&1 | tee /app/work/traces-flaky/mvn.log || true
 "
 
-# Sanity: Fixed+wrapper PASSED and Flaky+wrapper FAILED.
+# Sanity: Flaky+wrapper must fail.
 parse_summary() {
   local sum t f e
   sum=$(grep -E "Tests run:[[:space:]]+[0-9]+,[[:space:]]+Failures:[[:space:]]+[0-9]+,[[:space:]]+Errors:[[:space:]]+[0-9]+" \
@@ -263,17 +243,12 @@ parse_summary() {
   echo "$t $f $e"
 }
 
-read -r FT FF FE <<< "$(parse_summary "$DATA_DIR/traces-fixed/mvn.log")"
-echo "[sanity ] Fixed+wrapper:  Tests=$FT Failures=$FF Errors=$FE"
-if (( FT < 1 || FF + FE >= 1 )); then
-  echo "ERROR: Fixed+wrapper did not pass cleanly — pipeline broken"; exit 1
-fi
 read -r KT KF KE <<< "$(parse_summary "$DATA_DIR/traces-flaky/mvn.log")"
 echo "[sanity ] Flaky+wrapper:  Tests=$KT Failures=$KF Errors=$KE"
 if (( KT < 1 || KF + KE < 1 )); then
   echo "ERROR: Flaky+wrapper did not exhibit NIO behaviour — bug not reproduced"; exit 1
 fi
-echo "[sanity ] OK — Fixed passed, Flaky failed (NIO reproduced)"
+echo "[sanity ] OK — Flaky failed (NIO reproduced)"
 
 mkdir -p "$STEPS_OUT_DIR"
 

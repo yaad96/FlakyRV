@@ -89,9 +89,9 @@ if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
   fi
 fi
 
-# STEP 1 — unzip + patches
+# STEP 1 — unzip flaky source + failing TD variant
 need_step1=0
-for d in Fixed FlakyCodeChange Flakym2; do
+for d in Flaky FlakyCodeChange Flakym2; do
   [[ -d "$DATA_DIR/$d" ]] || need_step1=1
 done
 if (( need_step1 )); then
@@ -121,7 +121,6 @@ if (( need_step1 )); then
     cp -r "$DATA_DIR/Flaky" "$DATA_DIR/$target"
     patch -p1 -d "$DATA_DIR/$target" < "$DATA_DIR/$patch_file" >/dev/null
   }
-  apply_variant "Fixed"           "Fixed.patch"
   apply_variant "FlakyCodeChange" "FlakyCodeChange.patch"
 fi
 
@@ -142,7 +141,8 @@ docker exec "$CONTAINER" bash -c "
   set -e
   rm -rf /app/work/traces-flakycc; mkdir -p /app/work/traces-flakycc
   cd /app/work/FlakyCodeChange
-  mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
+  mvn install -DskipTests -pl $MODULE -am -q $MVNOPTS || \
+    mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
   mvn surefire:test \
     -pl $MODULE -Dtest='$VICTIM' \
     $MVNOPTS 2>&1 | tee /app/work/traces-flakycc/mvn.log || true
@@ -153,12 +153,15 @@ echo "[sanity ] Verifying FlakyCodeChange produced a test failure"
 SUMMARY=$(grep -E "Tests run:[[:space:]]+[0-9]+,[[:space:]]+Failures:[[:space:]]+[0-9]+,[[:space:]]+Errors:[[:space:]]+[0-9]+" \
             "$DATA_DIR/traces-flakycc/mvn.log" 2>/dev/null | tail -1 || true)
 if [[ -z "$SUMMARY" ]]; then
-  echo "WARNING: no Surefire summary in traces-flakycc/mvn.log — continuing"
+  echo "ERROR: no Surefire summary in traces-flakycc/mvn.log"; exit 1
 else
   TESTS=$(  sed -nE 's/.*Tests run:[[:space:]]+([0-9]+).*/\1/p' <<<"$SUMMARY"); TESTS=${TESTS:-0}
   FAILURES=$(sed -nE 's/.*Failures:[[:space:]]+([0-9]+).*/\1/p'  <<<"$SUMMARY"); FAILURES=${FAILURES:-0}
   ERRORS=$(  sed -nE 's/.*Errors:[[:space:]]+([0-9]+).*/\1/p'    <<<"$SUMMARY"); ERRORS=${ERRORS:-0}
   echo "[sanity ] FlakyCodeChange: Tests=$TESTS Failures=$FAILURES Errors=$ERRORS"
+  if (( TESTS < 1 || FAILURES + ERRORS < 1 )); then
+    echo "ERROR: FlakyCodeChange did not fail as expected"; exit 1
+  fi
 fi
 
 mkdir -p "$STEPS_OUT_DIR"

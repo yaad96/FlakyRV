@@ -6,7 +6,7 @@
 # category-specific exemplars to the agent.
 #
 # What this script does instead:
-#   1.  unzip + Fixed.patch (evaluation scaffold only)
+#   1.  unzip flaky source
 #   2.  start docker container
 #   3.  pre-build + run  mvn test -Dtest=<victim>  to capture the failure
 #       log in  traces-fail/mvn.log  (the same path the orchestrator probes)
@@ -102,7 +102,7 @@ if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
   fi
 fi
 
-# STEP 1 — unzip + Fixed.patch
+# STEP 1 — unzip flaky source
 need_step1=0
 for d in Flaky Flakym2; do [[ -d "$DATA_DIR/$d" ]] || need_step1=1; done
 if (( need_step1 )); then
@@ -119,11 +119,6 @@ if (( need_step1 )); then
   if [[ -d "$DATA_DIR/$ZIP" ]]; then
     mv "$DATA_DIR/$ZIP/"* "$DATA_DIR/" 2>/dev/null || true
     rmdir "$DATA_DIR/$ZIP" 2>/dev/null || true
-  fi
-  if [[ ! -d "$DATA_DIR/Fixed" && -f "$DATA_DIR/Fixed.patch" ]]; then
-    echo "[step 1b] Creating Fixed/ = Flaky/ + Fixed.patch (evaluation only)"
-    cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Fixed"
-    patch -p1 -d "$DATA_DIR/Fixed" < "$DATA_DIR/Fixed.patch" >/dev/null
   fi
 fi
 
@@ -160,14 +155,14 @@ echo "[sanity ] Verifying the run produced a test failure"
 SUMMARY=$(grep -E "Tests run:[[:space:]]+[0-9]+,[[:space:]]+Failures:[[:space:]]+[0-9]+,[[:space:]]+Errors:[[:space:]]+[0-9]+" \
             "$DATA_DIR/traces-fail/mvn.log" 2>/dev/null | tail -1 || true)
 if [[ -z "$SUMMARY" ]]; then
-  echo "WARNING: no Surefire summary in traces-fail/mvn.log — continuing anyway"
+  echo "ERROR: no Surefire summary in traces-fail/mvn.log"; exit 1
 else
   TESTS=$(  sed -nE 's/.*Tests run:[[:space:]]+([0-9]+).*/\1/p' <<<"$SUMMARY"); TESTS=${TESTS:-0}
   FAILURES=$(sed -nE 's/.*Failures:[[:space:]]+([0-9]+).*/\1/p'  <<<"$SUMMARY"); FAILURES=${FAILURES:-0}
   ERRORS=$(  sed -nE 's/.*Errors:[[:space:]]+([0-9]+).*/\1/p'    <<<"$SUMMARY"); ERRORS=${ERRORS:-0}
   echo "[sanity ] Tests=$TESTS Failures=$FAILURES Errors=$ERRORS"
-  if (( TESTS > 0 && FAILURES + ERRORS == 0 )); then
-    echo "WARNING: test passed on first run (possibly intermittent) — continuing anyway"
+  if (( TESTS < 1 || FAILURES + ERRORS < 1 )); then
+    echo "ERROR: run did not fail as expected"; exit 1
   fi
 fi
 
