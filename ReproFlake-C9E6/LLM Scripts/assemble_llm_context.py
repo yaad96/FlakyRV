@@ -657,12 +657,6 @@ def extract_failure_from_log(log_path):
 
         failure_lines.append(line)
 
-        # Safety cap: keep the full exception + stack trace (deep traces with
-        # "Caused by:" chains routinely exceed 40 lines); the boundary checks
-        # above are the normal terminators, this only guards pathological logs.
-        if len(failure_lines) > 300:
-            break
-
     if not failure_lines:
         return "(no failure output found in log)"
 
@@ -733,5 +727,4 @@ def derive_project_package(fqn, depth=3):
     if len(parts) >= depth:
         return ".".join(parts[:depth])
     return class_part
-
 

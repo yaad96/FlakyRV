@@ -97,4 +97,5 @@ TEMPERATURE: float = 0
 TOOL_OUTPUT_MAX_CHARS: int = 16_000
 # Per-tool-call output cap in characters. Results beyond this limit are
 # truncated and a notice appended. Prevents a large file from blowing
-# the context window.
+# the context window. get_error_logs and exact text-resource get_code calls
+# bypass this cap so failure diagnostics and golden files are not hidden.

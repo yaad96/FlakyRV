@@ -266,7 +266,8 @@ def run(args: argparse.Namespace) -> None:
                     tools_used_this_iter.append(tc.function.name)
                     result_text = agent_tools.dispatch_tool(
                         args.container, tc.function.name, targs)
-                    if len(result_text) > TOOL_OUTPUT_MAX_CHARS:
+                    if (agent_tools.should_truncate_tool_output(tc.function.name, targs)
+                            and len(result_text) > TOOL_OUTPUT_MAX_CHARS):
                         result_text = (
                             result_text[:TOOL_OUTPUT_MAX_CHARS]
                             + f"\n\n(tool output truncated at "
@@ -390,7 +391,7 @@ def run(args: argparse.Namespace) -> None:
                     f"non-deterministic.\n\n"
                     f"Confirmation runs ({VERIFY_PASS_RUNS} total):\n"
                     f"{confirm_summary}\n"
-                    f"\n--- last failing verify log (tail) ---\n"
+                    f"\n--- last failing verify log ---\n"
                     f"{verify_tail.rstrip()}\n"
                     f"\nFlaky/ has been restored to its pre-patch state. The fix "
                     f"does not pass consistently. Re-examine the root cause and "

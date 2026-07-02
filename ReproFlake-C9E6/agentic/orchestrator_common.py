@@ -36,6 +36,8 @@ from assemble_llm_context import (  # type: ignore  # noqa: E402
     DATA_DIR,
     load_csv_row,
     extract_failure_from_log,
+    fqn_to_path,
+    find_source_file,
 )
 
 # Tuneable constants (shared by both backends).
@@ -90,6 +92,45 @@ def build_initial_user_prompt(container: str, row: dict,
         test_code    = agent_tools.get_test_code(container).strip(),
         failure_text = failure_text.strip() or "(no failure block was extracted)",
     ).rstrip() + "\n"
+
+
+def _source_file_exists(source_base: Path, module: str, fqn: str) -> bool:
+    rel_path, _ = fqn_to_path(fqn)
+    return bool(find_source_file(
+        str(source_base), module, rel_path,
+        search_dirs=("src/main/java", "src/test/java"),
+    ))
+
+
+def detect_out_of_scope_failure(row: dict, source_base: Path,
+                                failure_text: str) -> str | None:
+    """Return a reason when the failure root is outside the editable tree.
+
+    Keep this deliberately conservative: this gate exists for dependency
+    classes whose bytecode is used during verification but whose sources are
+    absent from Flaky/, so any patch the agent can submit is downstream of the
+    real bug. Broaden only with similarly concrete signatures.
+    """
+    if "Unable to generate xml from deployment descriptor" not in failure_text:
+        return None
+    roots = (
+        "org.kie.internal.runtime.manager.deploy.DeploymentDescriptorImpl",
+        "org.kie.internal.runtime.manager.deploy.DeploymentDescriptorIO",
+    )
+    if not any(root in failure_text for root in roots):
+        return None
+    module = (row.get("module") or ".").strip()
+    missing = [root for root in roots
+               if not _source_file_exists(source_base, module, root)]
+    if len(missing) != len(roots):
+        return None
+    return (
+        "setup fails while JAXB marshals the KIE deployment descriptor, but "
+        "the responsible org.kie.internal.runtime.manager.deploy sources "
+        "are not present under the editable Flaky/ tree. Verification uses "
+        "the compiled kie-internal dependency from .m2, so test-side patches "
+        "cannot change the serializer that is failing."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +324,7 @@ def run_apply_fix(container: str, docker_container: str) -> dict:
 
 
 def run_verify(container: str, docker_container: str) -> tuple[str, str]:
-    """Invoke agentic_verify.py. Returns (verdict, log_tail)."""
+    """Invoke agentic_verify.py. Returns (verdict, failure log)."""
     cmd = [
         sys.executable, str(SCRIPT_DIR / "agentic_verify.py"),
         container, "--docker-container", docker_container,
@@ -305,16 +346,13 @@ def run_verify(container: str, docker_container: str) -> tuple[str, str]:
     if log_path.is_file():
         # Prefer the same Surefire failure block the original failure went
         # through (exception + message + stack trace) so post-patch failures
-        # are reported uniformly. Fall back to the raw tail when no failure
+        # are reported uniformly. Fall back to the raw log when no failure
         # block is found (extract_* returns a "(...)" sentinel).
         block = extract_failure_from_log(str(log_path))
         if block and not block.startswith("("):
             log_text = block
         else:
-            lines = log_path.read_text(encoding="utf-8",
-                                       errors="replace").splitlines()
-            log_text = "\n".join(lines[-120:]) if len(lines) > 120 else \
-                "\n".join(lines)
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
     return verdict, log_text
 
 
@@ -394,14 +432,25 @@ def format_failure_report(apply_report: dict, verdict: str,
     for la in layers:
         layer = la.get("layer") or "?"
         ok = "ok" if la.get("ok") else "fail"
-        reason = (la.get("reason") or "").splitlines()
-        reason_short = " ".join(reason)[:300]
+        details = []
+        reason = " ".join((la.get("reason") or "").splitlines())
+        if reason:
+            details.append(reason)
+        rewritten = la.get("path_rewritten") or {}
+        if rewritten:
+            files = ", ".join(sorted(rewritten.values()))
+            details.append(f"files: {files}")
+        if la.get("applied") or la.get("failed"):
+            details.append(
+                f"applied={len(la.get('applied') or [])}, "
+                f"failed={len(la.get('failed') or [])}")
+        reason_short = " ".join(details)[:300]
         layers_section += f"  - {layer:32s} {ok}  {reason_short}\n"
 
     verify_section = ""
     if verify_tail:
         verify_section = (
-            "\n--- verify_after_fix.log (tail) ---\n"
+            "\n--- verify_after_fix.log ---\n"
             f"{verify_tail.rstrip()}\n")
 
     landed = result.get("layer") if result.get("ok") else None
@@ -577,6 +626,18 @@ def prepare_run(args) -> RunContext:
               "agent will see an empty failure log section.")
 
     initial_user = build_initial_user_prompt(args.container, row, failure_text)
+    oos_reason = detect_out_of_scope_failure(row, source_base, failure_text)
+    if oos_reason:
+        warning = (
+            "\n=== EDITABLE-SURFACE WARNING ===\n"
+            f"{oos_reason}\n"
+            "Do not spend turns retrying path/package variants for those "
+            "dependency classes. Continue the repair attempt anyway: inspect "
+            "reachable test or helper code and submit the best minimal patch "
+            "strategy available within Flaky/.\n"
+        )
+        print(f"[init ] editable-surface warning: {oos_reason}")
+        initial_user = initial_user.rstrip() + "\n" + warning
     (steps_dir / "llm_context.txt").write_text(initial_user, encoding="utf-8")
 
     iter_log_path = steps_dir / "agentic_iterations.jsonl"
@@ -584,10 +645,12 @@ def prepare_run(args) -> RunContext:
     iter_log_path.unlink(missing_ok=True)
     conv_path.unlink(missing_ok=True)
 
-    return RunContext(
+    ctx = RunContext(
         row=row, test_type=test_type, docker_container=docker_container,
         base=base, steps_dir=steps_dir, initial_user=initial_user,
         iter_log_path=iter_log_path, conv_path=conv_path)
+
+    return ctx
 
 
 def save_conversation(conv_path: Path, model: str, messages: list,

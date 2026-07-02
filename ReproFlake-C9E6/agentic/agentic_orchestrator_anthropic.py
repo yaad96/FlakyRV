@@ -199,9 +199,11 @@ def run(args: argparse.Namespace) -> None:
                         })
                         continue
                     tools_used_this_iter.append(tu["name"])
+                    tool_args = tu["input"] or {}
                     result_text = agent_tools.dispatch_tool(
-                        args.container, tu["name"], tu["input"] or {})
-                    if len(result_text) > TOOL_OUTPUT_MAX_CHARS:
+                        args.container, tu["name"], tool_args)
+                    if (agent_tools.should_truncate_tool_output(tu["name"], tool_args)
+                            and len(result_text) > TOOL_OUTPUT_MAX_CHARS):
                         result_text = (
                             result_text[:TOOL_OUTPUT_MAX_CHARS]
                             + f"\n\n(tool output truncated at "
@@ -324,7 +326,7 @@ def run(args: argparse.Namespace) -> None:
                     f"non-deterministic.\n\n"
                     f"Confirmation runs ({VERIFY_PASS_RUNS} total):\n"
                     f"{confirm_summary}\n"
-                    f"\n--- last failing verify log (tail) ---\n"
+                    f"\n--- last failing verify log ---\n"
                     f"{verify_tail.rstrip()}\n"
                     f"\nFlaky/ has been restored to its pre-patch state. "
                     f"The fix does not pass consistently. Re-examine the "

@@ -1579,6 +1579,24 @@ def recompile_in_container(container: str, modules: list) -> dict:
         ["docker", "exec", container, "bash", "-lc", bash_cmd],
         capture_output=True, text=True,
     )
+    combined = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0 and re.search(
+            r"maven-checkstyle-plugin|Checkstyle violations|header\.mismatch|"
+            r"ImportOrder|SpringHeader",
+            combined,
+            re.I):
+        retry_mvn_cmd = mvn_cmd + " -Ddisable.checks=true"
+        retry_bash_cmd = (
+            "cd /app/work/Flaky && "
+            "export SUREFIRE_VERSION=3.0.0-M8-SNAPSHOT && "
+            'export PATH="${JAVA_HOME:+$JAVA_HOME/bin:}$PATH" && '
+            + retry_mvn_cmd
+        )
+        r = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", retry_bash_cmd],
+            capture_output=True, text=True,
+        )
+        bash_cmd = retry_bash_cmd
     return {
         "skipped": False,
         "ok": r.returncode == 0,

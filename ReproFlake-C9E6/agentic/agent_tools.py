@@ -150,15 +150,83 @@ def get_test_code(container: str, test_name: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: get_code — production class header or method
+# Tool 2: get_code — production class header, method, or exact resource file
 # ---------------------------------------------------------------------------
 
+_TEXT_FILE_EXTS = {
+    ".yaml", ".yml", ".json", ".xml", ".properties", ".txt", ".csv",
+    ".conf", ".ini", ".md",
+}
+
+
+def _safe_relative_path(target: str) -> Path | None:
+    path = Path(target)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return path
+
+
+def _is_exact_text_file_target(target: str) -> bool:
+    rel = _safe_relative_path(target)
+    return rel is not None and (rel.suffix.lower() in _TEXT_FILE_EXTS or "/" in target)
+
+
+def should_truncate_tool_output(name: str, arguments: dict) -> bool:
+    if name == "get_error_logs":
+        return False
+    if name == "get_code" and _is_exact_text_file_target((arguments or {}).get("target") or ""):
+        return False
+    return True
+
+
+def _find_exact_text_file(source_base: Path, module: str, target: str) -> Path | None:
+    rel = _safe_relative_path(target)
+    if rel is None:
+        return None
+    if not _is_exact_text_file_target(target):
+        return None
+
+    target_without_flaky = Path(*rel.parts[1:]) if rel.parts and rel.parts[0] == "Flaky" else rel
+    roots: list[Path] = []
+    if module and module != ".":
+        roots.extend([
+            source_base / "Flaky" / module,
+            source_base / "Flaky" / module / "src" / "test" / "resources",
+            source_base / "Flaky" / module / "src" / "main" / "resources",
+        ])
+    roots.extend([
+        source_base,
+        source_base / "Flaky",
+        source_base / "Flaky" / "src" / "test" / "resources",
+        source_base / "Flaky" / "src" / "main" / "resources",
+    ])
+
+    for root in roots:
+        for candidate_rel in (rel, target_without_flaky):
+            candidate = root / candidate_rel
+            if candidate.is_file():
+                return candidate
+
+    flaky_root = source_base / "Flaky"
+    if flaky_root.is_dir():
+        resource_roots = (
+            flaky_root.glob("*/src/test/resources"),
+            flaky_root.glob("*/src/main/resources"),
+        )
+        for matches in resource_roots:
+            for root in sorted(matches):
+                candidate = root / target_without_flaky
+                if candidate.is_file():
+                    return candidate
+    return None
+
 def get_code(container: str, target: str) -> str:
-    """Return source for a class or method by FQN.
+    """Return source for a class/method by FQN, or an exact text resource.
 
     Accepted targets:
       - 'com.foo.Bar'              -> structural class header (no method bodies)
       - 'com.foo.Bar#methodName'   -> annotations + signature + body of method
+      - 'schemas/Foo.yaml'         -> exact text resource/file content
 
     Searches src/main/java first, then src/test/java. This is the agent's
     main vehicle for tracing state pollution into production code.
@@ -173,6 +241,12 @@ def get_code(container: str, target: str) -> str:
     source_base = _source_base(container, row)
     module = (row.get("module") or ".").strip()
 
+    text_file = _find_exact_text_file(source_base, module, target)
+    if text_file is not None:
+        rel_file = os.path.relpath(text_file, source_base)
+        text = read_file_safe(str(text_file))
+        return f"File: {rel_file}\n\n{text.rstrip()}\n"
+
     rel_path, method = fqn_to_path(target)
     # src/main/java first (production), then fall back to src/test/java.
     src_file = find_source_file(
@@ -180,7 +254,12 @@ def get_code(container: str, target: str) -> str:
         search_dirs=("src/main/java", "src/test/java"),
     )
     if not src_file:
-        return f"(no source file found for {target} under Flaky/)"
+        return (
+            f"(no editable source file found for {target} under Flaky/. "
+            f"If this FQN was copied exactly from the stack trace, it is "
+            f"likely supplied by a dependency or otherwise outside the "
+            f"editable tree; do not retry path variants for the same class.)"
+        )
 
     rel_src = os.path.relpath(src_file, source_base)
     if method:
@@ -242,7 +321,7 @@ def get_error_logs(container: str, log_type: str = "test_failure") -> str:
                        the full block when it needs the stack trace.
       'compile'      — apply_report.json compile/recompile error tail from
                        the most recent submit_patch attempt.
-      'verify'       — Steps_Output_Files/verify_after_fix.log tail from
+      'verify'       — Steps_Output_Files/verify_after_fix.log from
                        the most recent submit_patch attempt.
     """
     log_type = (log_type or "").strip().lower()
@@ -297,14 +376,12 @@ def get_error_logs(container: str, log_type: str = "test_failure") -> str:
                     "this log is only populated after submit_patch runs)")
         # Prefer the same Surefire failure block (exception + message + stack
         # trace) used for the original failure, so the agent sees the post-patch
-        # failure in the same shape. Fall back to the tail when no block is
+        # failure in the same shape. Fall back to the full log when no block is
         # found (e.g. infra/timeout output rather than a test assertion).
         block = extract_failure_from_log(str(log_path))
         if block and not block.startswith("("):
             return f"{block}\n"
-        lines = verify_log.splitlines()
-        tail = lines[-200:] if len(lines) > 200 else lines
-        return "\n".join(tail) + "\n"
+        return f"{verify_log.rstrip()}\n"
 
     return f"(unknown log_type '{log_type}'. {_LOG_KIND_HINT})"
 
@@ -611,7 +688,9 @@ TOOL_SCHEMAS = [
             "header (package + imports + signatures + fields, no method "
             "bodies). Pass an FQN with a method ('com.foo.Bar#baz') for "
             "the named method's annotations + signature + body. Searches "
-            "src/main/java first, then src/test/java."
+            "src/main/java first, then src/test/java. You may also pass an "
+            "exact text resource or repo-relative path named by the test or "
+            "failure log, such as 'schemas/Foo.yaml'."
         ),
         "input_schema": {
             "type": "object",
@@ -619,10 +698,12 @@ TOOL_SCHEMAS = [
                 "target": {
                     "type": "string",
                     "description": (
-                        "Either 'package.ClassName' (class header) or "
-                        "'package.ClassName#methodName' (method body). Copy "
-                        "the FQN verbatim from the stack trace, an import, or "
-                        "an extends/implements clause — do not guess the "
+                        "Either 'package.ClassName' (class header), "
+                        "'package.ClassName#methodName' (method body), or an "
+                        "exact text resource/path copied from the test or "
+                        "failure log (for example 'schemas/Foo.yaml'). Copy "
+                        "Java FQNs verbatim from the stack trace, an import, "
+                        "or an extends/implements clause — do not guess the "
                         "package. For a nested class, name its enclosing "
                         "top-level class (e.g. 'pkg.Outer.Inner' or "
                         "'pkg.Outer'); the file is located automatically "

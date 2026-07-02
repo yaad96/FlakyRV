@@ -65,7 +65,7 @@ MVNOPTS_ID = (
     '-Dmaven.parallel.force=false')
 # NIO MVNOPTS adds the additional skips that the NIO shell script uses; the
 # extra flags are no-ops on projects that don't define the relevant plugins.
-MVNOPTS_NIO = MVNOPTS_ID + ' -Dfindbugs.skip=true'
+MVNOPTS_NIO = MVNOPTS_ID + ' -Dfindbugs.skip=true -Ddisable.checks=true'
 
 EXT_JAR = "/tmp/ext-build/target/javamop-extension-1.0.jar"
 

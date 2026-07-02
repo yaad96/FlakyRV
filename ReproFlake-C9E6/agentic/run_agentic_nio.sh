@@ -219,17 +219,32 @@ gen_wrapper "$DATA_DIR/Flaky"
 MVNOPTS='-Ddependency-check.skip=true -Dgpg.skip=true -DfailIfNoTests=false -Dskip.installnodenpm -Dskip.npm -Dskip.yarn -Dlicense.skip -Dcheckstyle.skip -Drat.skip -Denforcer.skip -Danimal.sniffer.skip -Dmaven.javadoc.skip -Dwarbucks.skip -Dmodernizer.skip -Dimpsort.skip -Dmdep.analyze.skip -Dpgpverify.skip -Dxml.skip -Dcobertura.skip=true -Dfindbugs.skip=true -Dspotless.skip=true -Dspotless.check.skip=true -Dossindex.skip=true -Dmaven.bundle.plugin.skip=true -Dmaven.parallel.force=false'
 
 echo "[step 4d] /app/work/Flaky + wrapper -> /app/work/traces-flaky (failure log)"
-docker exec "$CONTAINER" bash -c "
-  set -e
+run_nio_wrapper() {
+  local extra_mvnopts="$1"
+  docker exec "$CONTAINER" bash -c "
+  set -e -o pipefail
   rm -rf /app/work/traces-flaky; mkdir -p /app/work/traces-flaky
+  : > /app/work/traces-flaky/mvn.log
   export SUREFIRE_VERSION=$SUREFIRE_VER
   cd /app/work/Flaky
-  mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
+  mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS $extra_mvnopts \
+    2>&1 | tee -a /app/work/traces-flaky/mvn.log
   mvn test \
     -pl $MODULE -am \
     -Dtest='${WRAPPER_FQCN}#runTwice' \
-    $MVNOPTS 2>&1 | tee /app/work/traces-flaky/mvn.log || true
+    $MVNOPTS $extra_mvnopts 2>&1 | tee -a /app/work/traces-flaky/mvn.log || true
 "
+}
+
+if ! run_nio_wrapper ""; then
+  if grep -Eiq 'maven-checkstyle-plugin|Checkstyle violations|header\.mismatch|ImportOrder|SpringHeader' \
+      "$DATA_DIR/traces-flaky/mvn.log" 2>/dev/null; then
+    echo "[step 4d] Checkstyle caused setup failure; retrying with -Ddisable.checks=true"
+    run_nio_wrapper "-Ddisable.checks=true"
+  else
+    exit 1
+  fi
+fi
 
 # Sanity: Flaky+wrapper must fail.
 parse_summary() {

@@ -143,7 +143,7 @@ docker exec "$CONTAINER" bash -c "
   cd /app/work/FlakyCodeChange
   mvn install -DskipTests -pl $MODULE -am -q $MVNOPTS || \
     mvn install -Dmaven.test.skip=true -pl $MODULE -am -q $MVNOPTS
-  mvn surefire:test \
+  mvn dependency:properties surefire:test \
     -pl $MODULE -Dtest='$VICTIM' \
     $MVNOPTS 2>&1 | tee /app/work/traces-flakycc/mvn.log || true
 "
