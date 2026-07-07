@@ -1,7 +1,7 @@
-ReproFlake-C9E6/data/
+AgentFlake/data/
 
 # Per-user generated run summary
-ReproFlake-C9E6/Complete?Containers?Summary.csv
+AgentFlake/Complete?Containers?Summary.csv
 
 # FlakyDoctor runtime artifacts — cloned subject projects and per-run outputs
 FlakyDoctor/projects/
@@ -16,6 +16,9 @@ __pycache__/
 
 # macOS Finder metadata — purely Finder UI state, no code value
 .DS_Store
+
+# VS Code workspace settings — local IDE state
+.vscode/
 
 # Claude Code session state — local-only, must not be committed
 .claude/

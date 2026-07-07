@@ -1,3 +1,3 @@
-# CS691/ SWE699 Project
+# AgentFlake
 
-Reproducibility guide: [ReproFlake-C9E6/Reproducibility Guide.md](ReproFlake-C9E6/Reproducibility%20Guide.md)
+Reproducibility guide: [AgentFlake/Reproducibility_Guide.md](AgentFlake/Reproducibility_Guide.md)
