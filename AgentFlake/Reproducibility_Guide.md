@@ -5,8 +5,8 @@ case from `test_config.csv`, prepares the subject project, collects the
 smallest useful context, asks an LLM to produce a patch, applies the patch,
 and validates the repaired test.
 
-This guide describes the current way to run AgentFlake from this repository.
-The two normal entry points are:
+This guide describes how to run AgentFlake from this repository. The two
+normal entry points are:
 
 ```bash
 python3 run_agentic.py oktahookssdkjavahooks9187787createUserTest --models claude --runs 1
@@ -74,20 +74,7 @@ Important paths:
 
 ---
 
-## 2. Artifacts and Related Code
-
-Additional artifacts used for comparison and inspection:
-
-| Artifact | Link / Location | Purpose |
-|---|---|---|
-| AgentFlake Claude agent code | [AgentFlake_Claude_Agent](https://anonymous.4open.science/r/AgentFlake_Claude_Agent/) | Code used for the Claude agent runs. |
-| `patches.zip` | `patches.zip` | Log of patches from our run over 164 cases. |
-| FlakyDoctor code | [AgentFlake_FlakyDoctor](https://anonymous.4open.science/r/AgentFlake_FlakyDoctor/) | Baseline FlakyDoctor code. |
-| FlakyGuard code | [agentic_fix_flakyguard](https://anonymous.4open.science/r/agentic_fix_flakyguard/README.md) | Baseline FlakyGuard code. |
-
----
-
-## 3. Prerequisites
+## 2. Prerequisites
 
 Install:
 
@@ -95,6 +82,20 @@ Install:
 - Docker Desktop or Docker Engine
 - Git
 - Java is provided by the AgentFlake Docker images for the subject projects
+
+Start Docker before running AgentFlake.
+
+On macOS:
+
+```bash
+open -a Docker
+```
+
+On Linux with systemd:
+
+```bash
+sudo systemctl start docker
+```
 
 Install Python dependencies from the `AgentFlake` directory:
 
@@ -134,7 +135,7 @@ environment variables are usually cleaner for local use.
 
 ---
 
-## 4. Understanding `test_config.csv`
+## 3. Understanding `test_config.csv`
 
 `AgentFlake/test_config.csv` is the case index. Each row contains:
 
@@ -170,7 +171,7 @@ When running AgentFlake, treat that value as the case ID.
 
 ---
 
-## 5. Run One Case
+## 4. Run One Case
 
 Go to the agentic directory:
 
@@ -228,7 +229,7 @@ Keeps the per-case working files after the run for inspection.
 
 ---
 
-## 6. Run Many Cases
+## 5. Run Many Cases
 
 Go to the agentic directory:
 
@@ -297,7 +298,7 @@ python3 run_agentic_bulk.py --csv ../test_config.csv --models claude --runs 1
 
 ---
 
-## 7. Model Aliases
+## 6. Model Aliases
 
 Aliases are defined in `AgentFlake/agentic/agentic_config.py`.
 
@@ -323,7 +324,7 @@ python3 run_agentic.py <case-id> --models gpt-4o --runs 1
 
 ---
 
-## 8. What Happens During a Run
+## 7. What Happens During a Run
 
 AgentFlake uses a five-step workflow.
 
@@ -366,7 +367,6 @@ The model can request context through tools:
 | `get_code` | Reads a specific Java class, method, or resource. |
 | `get_error_logs` | Reads failure, compile, or validation logs. |
 | `get_flaky_example` | Provides a category-specific repair exemplar when available. |
-| `get_rv_trace_diff` | Provides trace-difference context for categories that use trace evidence. |
 
 Tool use is bounded by limits in `agentic_config.py` and the prompt.
 
@@ -423,7 +423,7 @@ when `MAX_ITERATIONS` is reached.
 
 ---
 
-## 9. Output Locations
+## 8. Output Locations
 
 For a single case, archived runs are written under:
 
@@ -478,7 +478,7 @@ cat AgentFlake/data/AGENTIC_FULL_RUNS/<case-id>_runs/summary.csv
 
 ---
 
-## 10. Configuration
+## 9. Configuration
 
 Most defaults live in:
 
@@ -511,7 +511,7 @@ Edit `agentic_config.py` when you want a persistent default.
 
 ---
 
-## 11. Practical Run Recipes
+## 10. Practical Run Recipes
 
 ### Run One Known Case
 
@@ -550,7 +550,7 @@ python3 run_agentic_bulk.py --models claude --runs 1 --types id --limit 3 --dry-
 
 ---
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
 ### `ERROR: CSV not found`
 
@@ -636,7 +636,7 @@ iteration budget.
 
 ---
 
-## 13. Quick Checklist
+## 12. Quick Checklist
 
 1. Install Python dependencies:
 
@@ -672,3 +672,16 @@ iteration budget.
    ```bash
    cat ../data/AGENTIC_FULL_RUNS/<case-id>_runs/summary.csv
    ```
+
+---
+
+## 13. Artifacts and Related Code
+
+Additional artifacts used for comparison and inspection:
+
+| Artifact | Link / Location | Purpose |
+|---|---|---|
+| AgentFlake Claude agent code | [AgentFlake_Claude_Agent](https://anonymous.4open.science/r/AgentFlake_Claude_Agent/) | Code used for the Claude agent runs. |
+| `patches.zip` | [patches.zip](patches.zip) | Log of patches from our run over 164 cases. |
+| FlakyDoctor code | [AgentFlake_FlakyDoctor](https://anonymous.4open.science/r/AgentFlake_FlakyDoctor/) | Baseline FlakyDoctor code. |
+| FlakyGuard code | [agentic_fix_flakyguard](https://anonymous.4open.science/r/agentic_fix_flakyguard/README.md) | Baseline FlakyGuard code. |
