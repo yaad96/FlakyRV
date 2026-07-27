@@ -50,7 +50,7 @@ AgentFlake/
 | Path | Purpose |
 |---|---|
 | `AgentFlake/test_config.csv` | Lists every repair case, including case ID, flaky-test type, Maven module, victim test, Java version, dataset zip, and download URL. |
-| `AgentFlake/agentic/run_agentic.py` | Main command for running one case; it reads the CSV, resolves the model, and starts the pass@k runner. |
+| `AgentFlake/agentic/run_agentic.py` | Main command for running one case; it reads the CSV, resolves the model, and starts the repeated-run harness. |
 | `AgentFlake/agentic/run_agentic_bulk.py` | Runs many CSV rows in order, with filters such as `--limit`, `--types`, and `--dry-run`. |
 | `AgentFlake/agentic/run_agentic_pass_at_k.py` | Repeats one case for `--runs N`, archives each run, and writes per-run summaries. |
 | `AgentFlake/agentic/run_agentic_od.sh` | Prepares and validates order-dependent cases with a polluter and victim test. |
@@ -64,7 +64,7 @@ AgentFlake/
 | `AgentFlake/agentic/agentic_verify.py` | Re-runs the relevant validation command after a patch is applied. |
 | `AgentFlake/LLM Scripts/apply_fix.py` | Applies the LLM patch to the checked-out flaky project, recompiles it, and writes `apply_report.json`. |
 | `AgentFlake/LLM Scripts/assemble_llm_context.py` | Shared helper code for CSV loading, source lookup, Java method extraction, and failure-log extraction. |
-| `AgentFlake/data/` | Stores downloaded dataset zips, unpacked case workspaces, run logs, and archived pass@k outputs. |
+| `AgentFlake/data/` | Stores downloaded dataset zips, unpacked case workspaces, run logs, and archived outputs. |
 
 ## 3. Prerequisites
 
@@ -209,7 +209,7 @@ python3 run_agentic_bulk.py --models claude --runs 1 --limit 20
 
 ## 8. Output Locations
 
-For one case, pass@k archives are written under:
+Run archives are written under:
 
 ```text
 AgentFlake/data/AGENTIC_FULL_RUNS/<case-id>_runs/

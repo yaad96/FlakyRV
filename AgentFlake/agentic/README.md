@@ -65,7 +65,7 @@ builds it from one of the Dockerfiles in `AgentFlake/`.
 
 | Path | Purpose |
 |---|---|
-| `AgentFlake/agentic/run_agentic.py` | Main command for one case; reads the CSV and starts the pass@k runner. |
+| `AgentFlake/agentic/run_agentic.py` | Main command for one case; reads the CSV and starts the repeated-run harness. |
 | `AgentFlake/agentic/run_agentic_bulk.py` | Runs many CSV rows in order. |
 | `AgentFlake/agentic/run_agentic_pass_at_k.py` | Runs one case multiple times and archives each attempt. |
 | `AgentFlake/agentic/agentic_orchestrator.py` | Chooses the Anthropic or OpenAI backend for the repair loop. |
@@ -82,7 +82,7 @@ Run artifacts are written under:
 AgentFlake/data/<container>/Steps_Output_Files/
 ```
 
-Pass@k archives are written under:
+Run archives are written under:
 
 ```text
 AgentFlake/data/AGENTIC_FULL_RUNS/<container>_runs/
