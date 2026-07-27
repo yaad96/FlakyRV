@@ -1,19 +1,34 @@
 # Agentic Flaky-Test Repair
 
-This directory contains the active AgentFlake runner.
+This directory contains the active AgentFlake runner. Paths below are written
+from the repository root, starting with `AgentFlake/`.
 
-Normal entry point:
+## Run One Case
 
 ```bash
-cd FlakyRV/AgentFlake/agentic
-python3 run_agentic.py <container> --models claude --runs 1
+cd AgentFlake/agentic
+python3 run_agentic.py oktahookssdkjavahooks9187787createUserTest --models claude --runs 1
 ```
 
-Example:
+Use a different case ID with the same command shape:
 
 ```bash
-cd FlakyRV/AgentFlake/agentic
-python3 run_agentic.py oktahookssdkjavahooks9187787createUserTest --models claude --runs 1
+cd AgentFlake/agentic
+python3 run_agentic.py <case-id> --models claude --runs 1
+```
+
+## Run Bulk Cases
+
+```bash
+cd AgentFlake/agentic
+python3 run_agentic_bulk.py --models claude --runs 1
+```
+
+Preview a bulk run without executing cases:
+
+```bash
+cd AgentFlake/agentic
+python3 run_agentic_bulk.py --models claude --runs 1 --dry-run
 ```
 
 ## Prerequisites
@@ -21,81 +36,54 @@ python3 run_agentic.py oktahookssdkjavahooks9187787createUserTest --models claud
 Install dependencies:
 
 ```bash
-cd FlakyRV/AgentFlake
+cd AgentFlake
 python3 -m pip install -r requirements.txt
 ```
 
 Set the key for the provider you run:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
 ```
 
 Docker must be running. If a required image is missing, the per-type script
-builds it from one of the Dockerfiles in
-`FlakyRV/AgentFlake/`.
+builds it from one of the Dockerfiles in `AgentFlake/`.
 
 ## Supported Types
 
 | CSV `test_type` | Script invoked |
 |---|---|
-| `od` | `FlakyRV/AgentFlake/agentic/run_agentic_od.sh` |
-| `td` | `FlakyRV/AgentFlake/agentic/run_agentic_td.sh` |
-| `id` | `FlakyRV/AgentFlake/agentic/run_agentic_id.sh` |
-| `nio` | `FlakyRV/AgentFlake/agentic/run_agentic_nio.sh` |
-| `unclassified` / `unassigned` | `FlakyRV/AgentFlake/agentic/run_agentic_unclassified.sh` |
-| `brittle` / `britle` | `FlakyRV/AgentFlake/agentic/run_agentic_brittle.sh` |
+| `od` | `AgentFlake/agentic/run_agentic_od.sh` |
+| `td` | `AgentFlake/agentic/run_agentic_td.sh` |
+| `id` | `AgentFlake/agentic/run_agentic_id.sh` |
+| `nio` | `AgentFlake/agentic/run_agentic_nio.sh` |
+| `unclassified` / `unassigned` | `AgentFlake/agentic/run_agentic_unclassified.sh` |
+| `brittle` / `britle` | `AgentFlake/agentic/run_agentic_brittle.sh` |
 
-## Runtime Flow
+## Important Files
 
-1. `FlakyRV/AgentFlake/agentic/run_agentic.py`
-   reads `FlakyRV/AgentFlake/test_config.csv`,
-   resolves model aliases, and calls
-   `FlakyRV/AgentFlake/agentic/run_agentic_pass_at_k.py`.
-2. `FlakyRV/AgentFlake/agentic/run_agentic_pass_at_k.py`
-   runs the matching per-type shell script once per requested run.
-3. The per-type script prepares
-   `FlakyRV/AgentFlake/data/<container>/`,
-   starts Docker, reproduces the flaky failure, snapshots `Flaky/` to
-   `Flaky.pristine`, and launches
-   `FlakyRV/AgentFlake/agentic/agentic_orchestrator.py`.
-4. The orchestrator exposes read-only context tools from
-   `FlakyRV/AgentFlake/agentic/agent_tools.py`.
-5. The model calls `submit_patch`; the orchestrator writes `llm_response.json`,
-   applies it through
-   `FlakyRV/AgentFlake/LLM Scripts/apply_fix.py`,
-   recompiles, and runs
-   `FlakyRV/AgentFlake/agentic/agentic_verify.py`.
-6. On failure, `Flaky/` is restored from `Flaky.pristine` and the agent can try
-   again until `MAX_ITERATIONS` is reached.
-
-## Useful Commands
-
-```bash
-cd FlakyRV/AgentFlake/agentic
-python3 run_agentic.py <container> --models claude --runs 3
-python3 run_agentic.py <container> --models claude,claude-opus --runs 1
-python3 run_agentic.py <container> --models claude --runs 1 --max-iterations 5
-python3 run_agentic.py <container> --models claude --runs 1 --keep-workspace
-python3 run_agentic_bulk.py --models claude --runs 1 --dry-run
-```
+| Path | Purpose |
+|---|---|
+| `AgentFlake/agentic/run_agentic.py` | Main command for one case; reads the CSV and starts the pass@k runner. |
+| `AgentFlake/agentic/run_agentic_bulk.py` | Runs many CSV rows in order. |
+| `AgentFlake/agentic/run_agentic_pass_at_k.py` | Runs one case multiple times and archives each attempt. |
+| `AgentFlake/agentic/agentic_orchestrator.py` | Chooses the Anthropic or OpenAI backend for the repair loop. |
+| `AgentFlake/agentic/agent_tools.py` | Tools the LLM uses to inspect tests, source files, logs, and examples. |
+| `AgentFlake/agentic/agentic_verify.py` | Re-runs validation after a patch is applied. |
+| `AgentFlake/LLM Scripts/apply_fix.py` | Applies the patch and writes patch/compile results. |
+| `AgentFlake/LLM Scripts/assemble_llm_context.py` | Shared source-code and log-extraction helpers. |
 
 ## Outputs
 
 Run artifacts are written under:
 
 ```text
-FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/
+AgentFlake/data/<container>/Steps_Output_Files/
 ```
 
-Common files:
+Pass@k archives are written under:
 
-| File | Description |
-|---|---|
-| `FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/agentic_conversation.json` | Full model/tool transcript. |
-| `FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/agentic_iterations.jsonl` | One JSON line per patch attempt. |
-| `FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/llm_response.json` | Last `submit_patch` payload. |
-| `FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/apply_report.json` | Patch application and compile report. |
-| `FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/verify_after_fix.log` | Raw Maven verification output. |
-| `FlakyRV/AgentFlake/data/<container>/Steps_Output_Files/verify_after_fix.verdict` | `PASSED`, `FAILED`, or `INCOMPLETE`. |
+```text
+AgentFlake/data/AGENTIC_FULL_RUNS/<container>_runs/
+```
