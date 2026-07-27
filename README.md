@@ -324,11 +324,11 @@ cd agentic
 python3 run_agentic.py oktahookssdkjavahooks9187787createUserTest --models claude --runs 1
 ```
 
-## 13. Artifacts and Related Code
+## 11. Artifacts and Related Code
 
 | Artifact | Link / Location | Purpose |
 |---|---|---|
 | AgentFlake Claude agent code | [AgentFlake_Claude_Agent](https://anonymous.4open.science/r/AgentFlake_Claude_Agent/) | Code used for the Claude agent runs. |
-| `patches.zip` | `AgentFlake/patches.zip` | Log of patches from our run over 164 cases. |
+| `patches.zip` | [AgentFlake/patches.zip](AgentFlake/patches.zip) | Log of patches from our run over 164 cases. |
 | FlakyDoctor code | [AgentFlake_FlakyDoctor](https://anonymous.4open.science/r/AgentFlake_FlakyDoctor/) | Baseline FlakyDoctor code. |
 | FlakyGuard code | [agentic_fix_flakyguard](https://anonymous.4open.science/r/agentic_fix_flakyguard/README.md) | Baseline FlakyGuard code. |
