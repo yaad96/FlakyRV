@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -370,200 +368,6 @@ def get_flaky_example(category: str | None = None,
     if not path.is_file():
         return f"(no example file at {path})"
     return path.read_text(encoding="utf-8")
-_TRACEMOP_MVNOPTS = {
-    "id": (
-        "-Ddependency-check.skip=true -Dgpg.skip=true -DfailIfNoTests=false "
-        "-Dskip.installnodenpm -Dskip.npm -Dskip.yarn -Dlicense.skip "
-        "-Dcheckstyle.skip -Drat.skip -Denforcer.skip -Danimal.sniffer.skip "
-        "-Dmaven.javadoc.skip -Dfindbugs.skip -Dwarbucks.skip -Dmodernizer.skip "
-        "-Dimpsort.skip -Dmdep.analyze.skip -Dpgpverify.skip -Dxml.skip "
-        "-Dcobertura.skip=true -Dspotless.skip=true -Dspotless.check.skip=true "
-        "-Dossindex.skip=true -Dmaven.bundle.plugin.skip=true -Dmaven.parallel.force=false"
-    ),
-    "_default": (
-        "-DfailIfNoTests=false -Dgpg.skip=true -Dcheckstyle.skip "
-        "-Drat.skip -Denforcer.skip -Dmaven.javadoc.skip"
-    ),
-}
-
-_EXT_JAR = "/tmp/ext-build/target/javamop-extension-1.0.jar"
-
-
-def _docker_exec(docker: str, bash_cmd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["docker", "exec", docker, "bash", "-c", bash_cmd],
-        capture_output=True, text=True)
-
-
-def _tracemop_run(docker: str, variant: str, label: str,
-                  module: str, test_spec: str,
-                  extra_flags: str, mvnopts: str) -> None:
-    cmd = f"""set -e
-rm -rf /app/work/traces-{label}
-mkdir -p /app/work/traces-{label}
-export TRACEDB_CONFIG_PATH=/tmp/.trace-db.config
-printf 'db=memory\\ndumpDB=false\\n' > $TRACEDB_CONFIG_PATH
-export RVMLOGGINGLEVEL=UNIQUE
-export TRACEDB_PATH=/app/work/traces-{label}
-cd /app/work/{variant}
-mvn install -Dmaven.test.skip=true -pl '{module}' -am -q {mvnopts}
-mvn surefire:test -Dmaven.ext.class.path={_EXT_JAR} \\
-  -pl '{module}' -Dtest='{test_spec}' {extra_flags} \\
-  {mvnopts} 2>&1 | tee /app/work/traces-{label}/mvn.log || true"""
-    r = _docker_exec(docker, cmd)
-    if r.returncode != 0:
-        print(f"[rv_trace] WARNING: tracemop run '{label}' exit={r.returncode}",
-              file=sys.stderr)
-
-
-def _compute_rv_traces_lazy(container: str, base: Path) -> str:
-    """Trigger TraceMOP trace collection on demand. Returns the summary text."""
-    steps = base / "Steps_Output_Files"
-    config_path = steps / "trace_config.json"
-
-    if not config_path.is_file():
-        return ("(trace_config.json not found in Steps_Output_Files/ — "
-                "TraceMOP infrastructure was not set up by the shell script)")
-    try:
-        cfg = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return f"(trace_config.json unreadable: {exc})"
-
-    if not cfg.get("tracemop_ready"):
-        return ("(TraceMOP is not available for this test type — "
-                "no trace diff can be computed)")
-
-    docker       = cfg.get("docker_container", "")
-    test_type    = cfg.get("test_type", "").lower().replace("britle", "brittle")
-    module       = cfg.get("module", ".") or "."
-    victim       = cfg.get("victim", "")
-    polluter     = cfg.get("polluter", "")
-    nondex_seed  = cfg.get("nondex_seed", "")
-    nondex_runs  = int(cfg.get("nondex_runs", 10) or 10)
-    wrapper_fqcn = cfg.get("wrapper_fqcn", "")
-    surefire_ver = cfg.get("surefire_version", "")
-
-    mvnopts = _TRACEMOP_MVNOPTS.get(test_type, _TRACEMOP_MVNOPTS["_default"])
-    print(f"[rv_trace] computing TraceMOP traces ({test_type}) …", file=sys.stderr)
-
-    if test_type in ("od", "brittle"):
-        _tracemop_run(docker, "Fixed", "fixed",
-                      module, victim, "-Dsurefire.runOrder=testorder", mvnopts)
-        _tracemop_run(docker, "Flaky", "flaky",
-                      module, f"{polluter},{victim}",
-                      "-Dsurefire.runOrder=testorder", mvnopts)
-        actual, expected = "traces-flaky", "traces-fixed"
-
-    elif test_type == "td":
-        _tracemop_run(docker, "Fixed",           "fixed",   module, victim, "", mvnopts)
-        _tracemop_run(docker, "FlakyCodeChange", "flakycc", module, victim, "", mvnopts)
-        actual, expected = "traces-flakycc", "traces-fixed"
-
-    elif test_type == "id":
-        pass_cmd = f"""set -e
-rm -rf /app/work/traces-pass && mkdir -p /app/work/traces-pass
-export TRACEDB_CONFIG_PATH=/tmp/.trace-db.config
-printf 'db=memory\\ndumpDB=false\\n' > $TRACEDB_CONFIG_PATH
-export RVMLOGGINGLEVEL=UNIQUE
-export TRACEDB_PATH=/app/work/traces-pass
-cd /app/work/Flaky
-mvn test -Dmaven.ext.class.path={_EXT_JAR} \\
-  -pl '{module}' -Dtest='{victim}' {mvnopts} 2>&1 | tee /app/work/traces-pass/mvn.log || true"""
-        _docker_exec(docker, pass_cmd)
-
-        nondex_plugin_version = (cfg.get("nondex_plugin_version")
-                                 or os.environ.get("NONDEX_PLUGIN_VERSION")
-                                 or "2.1.1")
-        fail_cmd = f"""set -e
-rm -rf /app/work/traces-fail && mkdir -p /app/work/traces-fail
-export TRACEDB_CONFIG_PATH=/tmp/.trace-db.config
-printf 'db=memory\\ndumpDB=false\\n' > $TRACEDB_CONFIG_PATH
-export RVMLOGGINGLEVEL=UNIQUE
-export TRACEDB_PATH=/app/work/traces-fail
-cd /app/work/Flaky
-mvn edu.illinois:nondex-maven-plugin:{nondex_plugin_version}:nondex \\
-  -DnondexSeed={nondex_seed} -DnondexRuns={nondex_runs} \\
-  -Dmaven.ext.class.path={_EXT_JAR} \\
-  -pl '{module}' -Dtest='{victim}' {mvnopts} 2>&1 | tee /app/work/traces-fail/mvn.log || true"""
-        _docker_exec(docker, fail_cmd)
-        actual, expected = "traces-fail", "traces-pass"
-
-    elif test_type == "nio":
-        if not wrapper_fqcn:
-            return ("(wrapper_fqcn missing from trace_config.json — "
-                    "cannot compute NIO trace diff)")
-        sf_flag = f"-Dsurefire.version={surefire_ver}" if surefire_ver else ""
-        for variant, label in [("Fixed", "fixed"), ("Flaky", "flaky")]:
-            cmd = f"""set -e
-rm -rf /app/work/traces-{label} && mkdir -p /app/work/traces-{label}
-export TRACEDB_CONFIG_PATH=/tmp/.trace-db.config
-printf 'db=memory\\ndumpDB=false\\n' > $TRACEDB_CONFIG_PATH
-export RVMLOGGINGLEVEL=UNIQUE
-export TRACEDB_PATH=/app/work/traces-{label}
-export SUREFIRE_VERSION={surefire_ver}
-cd /app/work/{variant}
-mvn install -Dmaven.test.skip=true -pl {module} -am -q {mvnopts}
-mvn test -Dmaven.ext.class.path={_EXT_JAR} \\
-  -pl {module} -am -Dtest='{wrapper_fqcn}#runTwice' \\
-  {sf_flag} {mvnopts} 2>&1 | tee /app/work/traces-{label}/mvn.log || true"""
-            _docker_exec(docker, cmd)
-        actual, expected = "traces-flaky", "traces-fixed"
-
-    else:
-        return f"(test_type '{test_type}' not supported for TraceMOP trace diff)"
-
-    cmp = subprocess.run(
-        ["docker", "exec", "-w", "/tmp", docker,
-         "python3", "compare-traces-official.py",
-         f"/app/work/{actual}", f"/app/work/{expected}", "false"],
-        capture_output=True, text=True)
-    rv_log = steps / "rv_trace_diff.log"
-    rv_log.write_text(cmp.stdout, encoding="utf-8")
-
-    # The summary script defaults to the non-agentic output paths.
-    subprocess.run(
-        [sys.executable,
-         str(LLM_SCRIPTS_DIR / "generate_llm_summary.py"), container,
-         "--steps-dir", str(steps),
-         "--compare-file", str(rv_log)],
-        cwd=str(LLM_SCRIPTS_DIR), capture_output=True, text=True)
-
-    summary_path = steps / "llm_trace_summary.txt"
-    if summary_path.is_file():
-        body = read_file_safe(str(summary_path)).strip()
-        return (body + "\n") if body else (
-            "(TraceMOP trace summary is empty — no spec violations recorded)")
-    return cmp.stdout or "(TraceMOP comparison produced no output)"
-
-
-def get_rv_trace_diff(container: str, test_name: str | None = None) -> str:
-    """Return the decoded TraceMOP trace-diff summary for this container.
-
-    On the first call, TraceMOP traces are collected lazily inside the running
-    docker container (this takes 1-3 minutes). Subsequent calls return the
-    cached llm_trace_summary.txt. Skip this tool when source code and error
-    logs are already sufficient to identify the root cause.
-    """
-    base = _container_base(container)
-    steps = base / "Steps_Output_Files"
-    summary_path = steps / "llm_trace_summary.txt"
-    if summary_path.is_file():
-        body = read_file_safe(str(summary_path)).strip()
-        if body:
-            return body + "\n"
-        return ("(llm_trace_summary.txt is empty — no spec violations recorded. "
-                "For NIO this can happen when the bug is driven by primitive-field "
-                "pollution rather than control-flow events the AspectJ specs monitor.)")
-    # TraceMOP is expensive; reuse a raw diff if summary generation failed.
-    rv_log = steps / "rv_trace_diff.log"
-    if rv_log.is_file() and rv_log.stat().st_size > 0:
-        body = read_file_safe(str(rv_log)).strip()
-        if body:
-            return ("(decoded summary unavailable; returning the raw TraceMOP "
-                    "trace diff)\n\n" + body + "\n")
-    return _compute_rv_traces_lazy(container, base)
-
-
 TOOL_SCHEMAS = [
     {
         "name": "get_test_code",
@@ -689,8 +493,6 @@ def dispatch_tool(container: str, name: str, arguments: dict) -> str:
         if name == "get_flaky_example":
             return get_flaky_example(
                 arguments.get("category"), container=container)
-        if name == "get_rv_trace_diff":
-            return get_rv_trace_diff(container, arguments.get("test_name"))
         return (f"(unknown tool '{name}'. Available: get_test_code, get_code, "
                 f"get_error_logs, get_flaky_example, submit_patch.)")
     except Exception as exc:  # noqa: BLE001

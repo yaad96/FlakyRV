@@ -1,6 +1,7 @@
 AgentFlake/data/
 
 # Per-user generated run summary
+AgentFlake/Complete_Containers_Summary.csv
 AgentFlake/Complete?Containers?Summary.csv
 
 # FlakyDoctor runtime artifacts — cloned subject projects and per-run outputs
@@ -14,7 +15,7 @@ __pycache__/
 *.pyo
 *.pyd
 
-# macOS Finder metadata — purely Finder UI state, no code value
+# Finder metadata
 .DS_Store
 
 # VS Code workspace settings — local IDE state

@@ -14,10 +14,4 @@ RUN apt-get update && \
 RUN pip3 install beautifulsoup4 lxml
 
 ENV MAVEN_OPTS="-Dmaven.repo.local=/root/.m2/repository"
-
-ENV MODULE=""
-ENV DIR_TO_PYTHON_SCRIPT=""
-ENV FULL_TEST_NAME=""
-ENV ITERATIONS="5"
-
-CMD ["/bin/bash", "-c", "cd /app/source && chmod +x statistics_generator.sh && ./statistics_generator.sh \"$MODULE\" \"$DIR_TO_PYTHON_SCRIPT\" \"$FULL_TEST_NAME\" \"$ITERATIONS\""]
+CMD ["/bin/bash"]
