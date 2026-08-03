@@ -29,7 +29,7 @@ MAX_ITERATIONS: int = 5
 MAX_TOOL_TURNS_PER_ITERATION: int = 10
 
 # Extra verification runs after the first pass.
-VERIFY_PASS_RUNS: int = 100
+VERIFY_PASS_RUNS: int = 5
 
 MAX_TOKENS: int = 16384
 TEMPERATURE: float = 0
