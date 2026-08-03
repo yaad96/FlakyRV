@@ -16,9 +16,22 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DEFAULT_RUNS_DIR = DEFAULT_DATA_DIR / "AGENTIC_FULL_RUNS"
-DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "AGENTIC_FINAL_PATCHES"
+SCRIPT_AGENTFLAKE_DIR = Path(__file__).resolve().parents[1]
+
+
+def default_data_dir() -> Path:
+    data_dir = SCRIPT_AGENTFLAKE_DIR / "data"
+    if (data_dir / "AGENTIC_FULL_RUNS").is_dir():
+        return data_dir
+
+    fallback = SCRIPT_AGENTFLAKE_DIR.parent / "ReproFlake-C9E6" / "data"
+    if (fallback / "AGENTIC_FULL_RUNS").is_dir():
+        return fallback
+    return data_dir
+
+
+def default_output_dir() -> Path:
+    return SCRIPT_AGENTFLAKE_DIR / "data" / "AGENTIC_FINAL_PATCHES"
 
 
 @dataclass(frozen=True)
@@ -36,20 +49,21 @@ class Candidate:
 
 
 def parse_args() -> argparse.Namespace:
+    runs_dir = default_data_dir() / "AGENTIC_FULL_RUNS"
     parser = argparse.ArgumentParser(
         description="Collect final patches and flaky source files from AGENTIC_FULL_RUNS."
     )
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=DEFAULT_RUNS_DIR,
-        help=f"Directory containing *_runs folders. Default: {DEFAULT_RUNS_DIR}",
+        default=runs_dir,
+        help=f"Directory containing *_runs folders. Default: {runs_dir}",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Output directory. Default: {DEFAULT_OUTPUT_DIR}",
+        default=None,
+        help=f"Output directory. Default: {default_output_dir()}",
     )
     return parser.parse_args()
 
@@ -467,13 +481,21 @@ def write_outputs(selected: dict[str, Candidate], output_dir: Path) -> None:
 def main() -> int:
     args = parse_args()
     runs_dir = args.runs_dir.resolve()
-    output_dir = args.output_dir.resolve()
-
-    if not runs_dir.is_dir():
-        raise SystemExit(f"Runs directory not found: {runs_dir}")
+    output_dir = (
+        args.output_dir.resolve()
+        if args.output_dir is not None
+        else default_output_dir().resolve()
+    )
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not runs_dir.is_dir():
+        (output_dir / "manifest.json").write_text("[]\n")
+        print(f"No runs directory found: {runs_dir}")
+        print(f"Created empty patch folder: {output_dir}")
+        return 0
 
     temp_dir = output_dir / ".generated_patch_cache"
     temp_dir.mkdir(parents=True, exist_ok=True)
