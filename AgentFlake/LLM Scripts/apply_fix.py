@@ -113,6 +113,16 @@ def _resolve_path(flaky_root: Path, rel_path: str):
     full = flaky_root / norm
     if full.is_file():
         return norm
+    aliases = []
+    # Some older Java projects use Ant-style test roots (`test/...`) while
+    # agents often infer Maven's `src/test/java/...` path from class names.
+    if "/src/test/java/" in norm:
+        aliases.append(norm.replace("/src/test/java/", "/test/", 1))
+    elif norm.startswith("src/test/java/"):
+        aliases.append(norm.replace("src/test/java/", "test/", 1))
+    for alias in aliases:
+        if (flaky_root / alias).is_file():
+            return alias
     basename = Path(norm).name
     if not basename:
         return None
@@ -126,7 +136,9 @@ def _resolve_path(flaky_root: Path, rel_path: str):
             rel = str(p.relative_to(flaky_root)).replace("\\", "/")
         except ValueError:
             continue
-        if rel == norm or rel.endswith("/" + norm):
+        if rel == norm or rel.endswith("/" + norm) or any(
+            rel == alias or rel.endswith("/" + alias) for alias in aliases
+        ):
             candidates.append(rel)
     if len(candidates) == 1:
         return candidates[0]
