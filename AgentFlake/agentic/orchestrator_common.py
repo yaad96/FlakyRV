@@ -21,6 +21,7 @@ import agentic_config     # type: ignore  # noqa: E402
 import prompts            # type: ignore  # noqa: E402
 from assemble_llm_context import (  # type: ignore  # noqa: E402
     DATA_DIR,
+    JAVA_SOURCE_DIRS,
     load_csv_row,
     extract_failure_from_log,
     fqn_to_path,
@@ -79,7 +80,7 @@ def _source_file_exists(source_base: Path, module: str, fqn: str) -> bool:
     rel_path, _ = fqn_to_path(fqn)
     return bool(find_source_file(
         str(source_base), module, rel_path,
-        search_dirs=("src/main/java", "src/test/java"),
+        search_dirs=JAVA_SOURCE_DIRS,
     ))
 
 
@@ -326,6 +327,17 @@ def classify_failure(apply_report: dict, verdict: str) -> str:
     if rc.get("ok") is False and not rc.get("skipped"):
         return "compile_failed"
     return "test_failed"
+
+
+def compile_confirmed(apply_report: dict) -> bool:
+    """True when the landed patch's compile check is clean enough to verify."""
+    rc = apply_report.get("recompile") or {}
+    if rc and not rc.get("skipped"):
+        return bool(rc.get("ok"))
+    c = apply_report.get("compile") or {}
+    if c and not c.get("skipped"):
+        return bool(c.get("all_ok"))
+    return True
 
 
 def restrategy_hint(category: str) -> str:

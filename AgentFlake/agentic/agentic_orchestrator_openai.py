@@ -278,10 +278,11 @@ def run(args: argparse.Namespace) -> None:
 
             apply_report = common.run_apply_fix(args.container, ctx.docker_container)
             applied_ok = bool((apply_report.get("result") or {}).get("ok"))
+            ready_to_verify = applied_ok and common.compile_confirmed(apply_report)
 
             verdict = "FAILED"
             verify_tail = ""
-            if applied_ok:
+            if ready_to_verify:
                 verdict, verify_tail = common.run_verify(
                     args.container, ctx.docker_container)
             else:

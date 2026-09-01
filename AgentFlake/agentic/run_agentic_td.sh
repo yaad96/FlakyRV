@@ -100,6 +100,7 @@ if (( need_step1 )); then
       mv "$DATA_DIR/$ZIP/"* "$DATA_DIR/" 2>/dev/null || true
       rmdir "$DATA_DIR/$ZIP" 2>/dev/null || true
     fi
+    rm -f "$ZIP_PATH"
   fi
   apply_variant() {
     local target="$1" patch_file="$2"

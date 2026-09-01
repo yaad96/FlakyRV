@@ -26,6 +26,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Script lives in AgentFlake/LLM Scripts/ ; data and CSV are one level up.
 DATA_DIR = os.path.join(SCRIPT_DIR, "..", "data")
 CSV_FILE = os.path.join(SCRIPT_DIR, "..", "test_config.csv")
+JAVA_SOURCE_DIRS = (
+    "src/test/java",
+    "src/main/java",
+    "tests/server/src",
+    "tests/src",
+    "src",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +105,7 @@ def fqn_to_path(fqn_with_method):
     return rel_path, method
 
 
-def find_source_file(base_dir, module, rel_path, search_dirs=("src/test/java", "src/main/java")):
+def find_source_file(base_dir, module, rel_path, search_dirs=JAVA_SOURCE_DIRS):
     """
     Find a Java source file under the project. Tries:
       1. <base>/Flaky/<module>/<search_dir>/<rel_path>  (multi-module)
@@ -696,11 +703,11 @@ def extract_production_code_from_stacktrace(failure_text, base_dir, module, proj
             continue
         seen.add(key)
 
-        # Try to find in src/main/java (production code)
+        # Try to find production code in common Maven and legacy Java roots.
         rel_path, _ = fqn_to_path(f"{class_fqn}#dummy")
         source_file = find_source_file(
             base_dir, module, rel_path,
-            search_dirs=("src/main/java",)
+            search_dirs=("src/main/java", "src")
         )
 
         if source_file:
@@ -727,4 +734,3 @@ def derive_project_package(fqn, depth=3):
     if len(parts) >= depth:
         return ".".join(parts[:depth])
     return class_part
-

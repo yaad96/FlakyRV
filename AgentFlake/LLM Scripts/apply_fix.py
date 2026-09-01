@@ -843,6 +843,35 @@ def find_method(src: str, name: str, llm_code: str = None):
     return _expand_method_loc(src, best)
 
 
+def _field_name_from_code(code: str) -> str | None:
+    lines = [ln.strip() for ln in (code or "").splitlines() if ln.strip()]
+    if len(lines) != 1 or "(" in lines[0] or not lines[0].endswith(";"):
+        return None
+    lhs = lines[0].split("=", 1)[0].rstrip(";").strip()
+    names = re.findall(r'\b[A-Za-z_$][\w$]*\b', lhs)
+    return names[-1] if names else None
+
+
+def _replace_field_declaration(src: str, field_name: str, code: str):
+    """Replace one Java field declaration for field edits mislabeled as methods."""
+    if not field_name:
+        return None
+    pat = re.compile(
+        rf'^[ \t]*(?:(?:public|protected|private|static|final|transient|volatile)\s+)*'
+        rf'[\w$<>\[\], ?]+\s+{re.escape(field_name)}\s*(?:=[^;]*)?;\n?',
+        re.M,
+    )
+    matches = list(pat.finditer(_code_mask(src)))
+    if len(matches) != 1:
+        return None
+    loc = matches[0]
+    indent = get_indent_at(src, loc.start())
+    new_code = reindent_block(code, indent)
+    if not new_code.endswith("\n"):
+        new_code += "\n"
+    return src[:loc.start()] + new_code + src[loc.end():]
+
+
 def find_outer_class_close(src: str):
     """Return the offset of the outermost class's closing '}', or None.
     Scans a string/comment mask so braces inside literals/comments are
@@ -964,13 +993,18 @@ def apply_fixed_code_entry(src: str, entry: dict) -> tuple:
         # has multiple methods with this name (inner-vs-outer, overloads).
         loc = find_method(src, method_name, llm_code=code)
         if loc is None:
-            raise ValueError(
-                f"replace_method: method {method_name!r} not found in {info['file']}")
-        indent = get_indent_at(src, loc[0])
-        new_code = reindent_block(code, indent)
-        if not new_code.endswith("\n"):
-            new_code += "\n"
-        result_src = src[:loc[0]] + new_code + src[loc[1]:]
+            field_name = _field_name_from_code(code) or method_name.replace(" field", "")
+            result_src = _replace_field_declaration(src, field_name, code)
+            if result_src is None:
+                raise ValueError(
+                    f"replace_method: method {method_name!r} not found in {info['file']}")
+            info["operation"] = "replace_field"
+        else:
+            indent = get_indent_at(src, loc[0])
+            new_code = reindent_block(code, indent)
+            if not new_code.endswith("\n"):
+                new_code += "\n"
+            result_src = src[:loc[0]] + new_code + src[loc[1]:]
 
     elif operation == "insert_method":
         if find_method(src, method_name) is not None:
@@ -1231,18 +1265,24 @@ def apply_fixed_code_entry_ts(src: str, entry: dict) -> tuple:
     if operation == "replace_method":
         node = _ts_find_method(tree, method_name, llm_code=code)
         if node is None:
-            raise ValueError(
-                f"replace_method: method {method_name!r} not found in {info['file']}")
-        indent = _ts_indent_of(src_bytes, node.start_byte)
-        line_start = src_bytes.rfind(b"\n", 0, node.start_byte) + 1
-        new_code = reindent_block(code, indent)
-        if not new_code.endswith("\n"):
-            new_code += "\n"
-        # Replace from column 0 of the method's first line (node.start_byte is
-        # after the indent) so the reindented block isn't double-indented.
-        result_bytes = (src_bytes[:line_start]
-                        + new_code.encode("utf-8")
-                        + src_bytes[node.end_byte:])
+            field_name = _field_name_from_code(code) or method_name.replace(" field", "")
+            result_src = _replace_field_declaration(src, field_name, code)
+            if result_src is None:
+                raise ValueError(
+                    f"replace_method: method {method_name!r} not found in {info['file']}")
+            info["operation"] = "replace_field"
+            result_bytes = result_src.encode("utf-8")
+        else:
+            indent = _ts_indent_of(src_bytes, node.start_byte)
+            line_start = src_bytes.rfind(b"\n", 0, node.start_byte) + 1
+            new_code = reindent_block(code, indent)
+            if not new_code.endswith("\n"):
+                new_code += "\n"
+            # Replace from column 0 of the method's first line (node.start_byte is
+            # after the indent) so the reindented block isn't double-indented.
+            result_bytes = (src_bytes[:line_start]
+                            + new_code.encode("utf-8")
+                            + src_bytes[node.end_byte:])
 
     elif operation == "insert_method":
         if _ts_find_method(tree, method_name) is not None:

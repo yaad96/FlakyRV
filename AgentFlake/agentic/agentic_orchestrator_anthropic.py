@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -76,6 +77,9 @@ def run(args: argparse.Namespace) -> None:
                  "       Set it in agentic_config.py or export it as an env var.")
 
     client = Anthropic(api_key=api_key)
+    supports_temperature = (
+        "temperature" in inspect.signature(client.messages.create).parameters
+    )
     excluded_tools = {t.strip() for t in args.exclude_tools.split(",") if t.strip()}
     tools = [t for t in common.all_tool_schemas()
              if t["name"] not in excluded_tools]
@@ -115,11 +119,12 @@ def run(args: argparse.Namespace) -> None:
             create_kwargs = {
                 "model": args.model,
                 "max_tokens": MAX_TOKENS,
-                "temperature": TEMPERATURE,
                 "system": SYSTEM_PROMPT,
                 "tools": submit_only_tools if force_submit else tools,
                 "messages": messages,
             }
+            if supports_temperature:
+                create_kwargs["temperature"] = TEMPERATURE
             if force_submit:
                 create_kwargs["tool_choice"] = {
                     "type": "tool",
@@ -211,10 +216,11 @@ def run(args: argparse.Namespace) -> None:
 
             apply_report = common.run_apply_fix(args.container, ctx.docker_container)
             applied_ok = bool((apply_report.get("result") or {}).get("ok"))
+            ready_to_verify = applied_ok and common.compile_confirmed(apply_report)
 
             verdict = "FAILED"
             verify_tail = ""
-            if applied_ok:
+            if ready_to_verify:
                 verdict, verify_tail = common.run_verify(
                     args.container, ctx.docker_container)
             else:

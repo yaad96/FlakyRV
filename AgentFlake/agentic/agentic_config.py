@@ -13,7 +13,8 @@ CLAUDE_MODELS: dict = {
 }
 
 OPENAI_MODELS: dict = {
-    "openai":              "gpt-4o",              # default OpenAI alias
+    "openai":              "gpt-5.4",             # default OpenAI alias
+    "gpt-5.4":             "gpt-5.4",
     "gpt-4o":              "gpt-4o",
     "gpt-4o-mini":         "gpt-4o-mini",
     "gpt-4.1":             "gpt-4.1",

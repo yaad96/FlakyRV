@@ -14,6 +14,7 @@ LLM_SCRIPTS_DIR = REPROFLAKE_DIR / "LLM Scripts"
 sys.path.insert(0, str(LLM_SCRIPTS_DIR))
 from assemble_llm_context import (  # type: ignore  # noqa: E402
     DATA_DIR,
+    JAVA_SOURCE_DIRS,
     load_csv_row,
     read_file_safe,
     fqn_to_path,
@@ -206,7 +207,7 @@ def get_code(container: str, target: str) -> str:
     rel_path, method = fqn_to_path(target)
     src_file = find_source_file(
         str(source_base), module, rel_path,
-        search_dirs=("src/main/java", "src/test/java"),
+        search_dirs=JAVA_SOURCE_DIRS,
     )
     if not src_file:
         return (
