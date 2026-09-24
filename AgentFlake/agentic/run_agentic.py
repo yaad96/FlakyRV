@@ -79,10 +79,8 @@ def main() -> None:
                          "Example: claude,claude-opus")
     ap.add_argument("--runs", type=int, default=3,
                     help="independent runs per model for pass@k (default 3)")
-    ap.add_argument("--max-iterations", type=int,
-                    default=agentic_config.MAX_ITERATIONS,
-                    help=f"hard cap on patch attempts per run "
-                         f"(default from config: {agentic_config.MAX_ITERATIONS})")
+    # No --max-iterations flag: agentic_config.MAX_ITERATIONS is the single
+    # place the cap is set, so every entry point runs the same budget.
     ap.add_argument("--keep-workspace", action="store_true",
                     help="keep data/<container>/ scratch workspace after each batch")
     args = ap.parse_args()
@@ -133,7 +131,7 @@ def main() -> None:
         sys.exit("ERROR: no valid models to run after resolution.")
 
     print(f"[dispatcher] runs        = {args.runs}")
-    print(f"[dispatcher] max-iters   = {args.max_iterations}")
+    print(f"[dispatcher] max-iters   = {agentic_config.MAX_ITERATIONS} (from agentic_config)")
     print()
 
     exit_codes: dict[str, int] = {}
@@ -146,7 +144,6 @@ def main() -> None:
             sys.executable, str(PASS_AT_K),
             args.container,
             "--runs",           str(args.runs),
-            "--max-iterations", str(args.max_iterations),
             "--model",          model_id,
         ]
         if args.keep_workspace:

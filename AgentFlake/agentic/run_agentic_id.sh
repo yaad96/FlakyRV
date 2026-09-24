@@ -200,11 +200,10 @@ rm -rf "$DATA_DIR/Flaky.pristine"
 cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Flaky.pristine"
 
 export NONDEXSEED NONDEX_RUNS NONDEX_PLUGIN_VERSION
-echo "[agent ] launching agentic_orchestrator.py (max_iterations=${AGENTIC_MAX_ITERATIONS:-agentic_config.MAX_ITERATIONS})"
+echo "[agent ] launching agentic_orchestrator.py (max_iterations from agentic_config.MAX_ITERATIONS)"
 set +e
 python3 "$SCRIPT_DIR/agentic_orchestrator.py" "$RESULT_CONTAINER" \
   --docker-container "$CONTAINER" \
-  ${AGENTIC_MAX_ITERATIONS:+--max-iterations "$AGENTIC_MAX_ITERATIONS"} \
   ${AGENTIC_MODEL:+--model "$AGENTIC_MODEL"}
 AGENT_RC=$?
 set -e

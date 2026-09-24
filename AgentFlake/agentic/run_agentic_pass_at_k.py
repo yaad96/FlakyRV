@@ -337,8 +337,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("container")
     ap.add_argument("--runs", type=int, default=3)
-    ap.add_argument("--max-iterations", type=int, default=10,
-                    help="hard cap on submit_patch attempts per run (default 10)")
+    # No --max-iterations flag: agentic_config.MAX_ITERATIONS is the single
+    # place the cap is set, so every entry point runs the same budget.
     ap.add_argument("--model", default="claude-sonnet-4-6",
                     help="Anthropic model id passed to agentic_orchestrator.py")
     ap.add_argument("--keep-workspace", action="store_true",
@@ -354,7 +354,7 @@ def main():
     runs_root = DATA_DIR / "AGENTIC_FULL_RUNS" / f"{args.container}_runs"
     runs_root.mkdir(parents=True, exist_ok=True)
     print(f"[wrapper] container={args.container}  test_type={test_type}  "
-          f"runs={args.runs}  max_iterations={args.max_iterations}  "
+          f"runs={args.runs}  max_iterations={agentic_config.MAX_ITERATIONS}  "
           f"model={args.model}")
     print(f"[wrapper] runs_root={runs_root}")
 
@@ -389,7 +389,6 @@ def main():
         env = os.environ.copy()
         env.pop("KEEP_SOURCE", None)
         env["KEEP_CONTAINER"] = "1"
-        env["AGENTIC_MAX_ITERATIONS"] = str(args.max_iterations)
         env["AGENTIC_MODEL"] = args.model
         env["PYTHONUNBUFFERED"] = "1"
         # This wrapper archives each run itself (archive_run below), and it owns

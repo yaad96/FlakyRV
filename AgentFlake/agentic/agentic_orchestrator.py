@@ -13,7 +13,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import agentic_config  # type: ignore  # noqa: E402
 
 DEFAULT_MODEL          = agentic_config.DEFAULT_MODEL
-DEFAULT_MAX_ITERATIONS = agentic_config.MAX_ITERATIONS
 
 
 def _resolve_model(alias: str) -> tuple[str, str]:
@@ -38,10 +37,8 @@ def main():
     ap.add_argument("container")
     ap.add_argument("--docker-container",
                     help="docker container name (default tm_<container>)")
-    ap.add_argument("--max-iterations", type=int,
-                    default=DEFAULT_MAX_ITERATIONS,
-                    help=f"hard cap on submit_patch attempts "
-                         f"(default {DEFAULT_MAX_ITERATIONS})")
+    # No --max-iterations flag: agentic_config.MAX_ITERATIONS is the single
+    # place the cap is set, so every entry point runs the same budget.
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"model ID or alias; routes to the matching provider "
                          f"backend (default: {DEFAULT_MODEL})")

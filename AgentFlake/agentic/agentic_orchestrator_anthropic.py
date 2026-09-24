@@ -25,7 +25,7 @@ DEFAULT_MODEL                = agentic_config.DEFAULT_MODEL
 MAX_TOKENS                   = common.MAX_TOKENS
 TEMPERATURE                  = common.TEMPERATURE
 MAX_TOOL_TURNS_PER_ITERATION = common.MAX_TOOL_TURNS_PER_ITERATION
-DEFAULT_MAX_ITERATIONS       = common.DEFAULT_MAX_ITERATIONS
+MAX_ITERATIONS               = common.DEFAULT_MAX_ITERATIONS
 TOOL_OUTPUT_MAX_CHARS        = common.TOOL_OUTPUT_MAX_CHARS
 VERIFY_PASS_RUNS             = common.VERIFY_PASS_RUNS
 SYSTEM_PROMPT                = common.SYSTEM_PROMPT
@@ -95,10 +95,10 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"[init ] container={args.container}  test_type={ctx.test_type}  "
           f"provider=anthropic  model={args.model}  "
-          f"max_iterations={args.max_iterations}")
+          f"max_iterations={MAX_ITERATIONS}")
 
-    for attempt in range(1, args.max_iterations + 1):
-        print(f"\n[iter {attempt}/{args.max_iterations}] ============")
+    for attempt in range(1, MAX_ITERATIONS + 1):
+        print(f"\n[iter {attempt}/{MAX_ITERATIONS}] ============")
         t_iter_start = time.time()
         iter_start_usage = dict(cumulative_usage)
         tool_turn = 0
@@ -257,7 +257,7 @@ def run(args: argparse.Namespace) -> None:
                 "tokens_in":  iter_delta.get("input_tokens", 0),
                 "tokens_out": iter_delta.get("output_tokens", 0),
                 "cache_read": iter_delta.get("cache_read_input_tokens", 0),
-                "max_iters":  args.max_iterations,
+                "max_iters":  MAX_ITERATIONS,
             }
             with open(ctx.iter_log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(iter_row) + "\n")
@@ -331,7 +331,7 @@ def run(args: argparse.Namespace) -> None:
         final_verdict=final_verdict, final_category=final_category,
         submit_attempts=submit_attempts, total_elapsed=total_elapsed,
         cumulative_usage=cumulative_usage, iter_summary_rows=iter_summary_rows,
-        max_iters=args.max_iterations)
+        max_iters=MAX_ITERATIONS)
     sys.exit(code)
 
 
@@ -340,10 +340,8 @@ def main():
     ap.add_argument("container")
     ap.add_argument("--docker-container",
                     help="docker container name (default tm_<container>)")
-    ap.add_argument("--max-iterations", type=int,
-                    default=DEFAULT_MAX_ITERATIONS,
-                    help=f"hard cap on submit_patch attempts "
-                         f"(default {DEFAULT_MAX_ITERATIONS})")
+    # No --max-iterations flag: agentic_config.MAX_ITERATIONS is the single
+    # place the cap is set, so every entry point runs the same budget.
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help=f"Anthropic model ID or alias (default: {DEFAULT_MODEL})")
     ap.add_argument("--exclude-tools", default="",

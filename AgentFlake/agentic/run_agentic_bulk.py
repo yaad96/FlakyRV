@@ -69,8 +69,8 @@ def main() -> None:
                          "(default: claude)")
     ap.add_argument("--runs", type=int, default=1,
                     help="independent runs per model for each container (default: 1)")
-    ap.add_argument("--max-iterations", type=int,
-                    help="optional patch-attempt cap passed to run_agentic.py")
+    # No --max-iterations flag: agentic_config.MAX_ITERATIONS is the single
+    # place the cap is set, so every entry point runs the same budget.
     ap.add_argument("--keep-workspace", action="store_true",
                     help="pass --keep-workspace to run_agentic.py")
     ap.add_argument("--types",
@@ -95,8 +95,6 @@ def main() -> None:
     print(f"[bulk] selected  = {len(selected)} / {len(rows)} rows")
     print(f"[bulk] models    = {args.models}")
     print(f"[bulk] runs      = {args.runs}")
-    if args.max_iterations is not None:
-        print(f"[bulk] max-iters = {args.max_iterations}")
     if args.dry_run:
         print("[bulk] dry-run   = true")
     print()
@@ -114,8 +112,6 @@ def main() -> None:
             "--models", args.models,
             "--runs", str(args.runs),
         ]
-        if args.max_iterations is not None:
-            cmd.extend(["--max-iterations", str(args.max_iterations)])
         if args.keep_workspace:
             cmd.append("--keep-workspace")
 
