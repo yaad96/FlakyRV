@@ -2,13 +2,25 @@ FROM maven:3.8.6-openjdk-8
 
 WORKDIR /app
 
+# Debian buster (base of maven:3.8.6-openjdk-*) is EOL and its packages now live
+# on archive.debian.org. Without this rewrite apt-get install fails with
+# "Unable to fetch some archives" (exit 100). No-op on a live-repo base image.
+RUN set -eux; \
+    if grep -qE 'buster|stretch' /etc/apt/sources.list 2>/dev/null; then \
+      sed -i -e 's|deb.debian.org|archive.debian.org|g' \
+             -e 's|security.debian.org|archive.debian.org|g' \
+             -e '/buster-updates/d' -e '/stretch-updates/d' \
+             /etc/apt/sources.list; \
+      echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid; \
+    fi
+
 RUN apt-get update && \
-    apt-get install -y autoconf automake libtool curl make g++ unzip python3 python3-pip && \
+    apt-get install -y --fix-missing autoconf automake libtool curl make g++ unzip python3 python3-pip && \
     ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && \
-    apt-get install -y xmlstarlet && \
+    apt-get install -y --fix-missing xmlstarlet && \
     rm -rf /var/lib/apt/lists/*    
 
 RUN pip3 install beautifulsoup4 lxml
