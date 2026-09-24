@@ -17,6 +17,17 @@ LLM_SCRIPTS="$REPROFLAKE_DIR/LLM Scripts"
 
 DATA_DIR="$REPROFLAKE_DIR/data/$RESULT_CONTAINER"
 STEPS_OUT_DIR="$DATA_DIR/Steps_Output_Files"
+
+# Docker writes into the bind-mounted workspace as root. Hadoop/HBase tests
+# create root-owned HDFS dirs there, which makes our later `cp` (step 9.5) and
+# `rm -rf` (step 0 / cleanup) fail with Permission denied and abort the run.
+# Hand ownership back using a throwaway root container before touching them.
+reclaim_owner() {
+  [[ -d "$DATA_DIR" ]] || return 0
+  docker run --rm -u 0 -v "$DATA_DIR":/reclaim alpine \
+    chown -R "$(id -u):$(id -g)" /reclaim > /dev/null 2>&1 || true
+}
+
 CSV="$REPROFLAKE_DIR/test_config.csv"
 
 [[ -f "$CSV" ]] || { echo "ERROR: $CSV not found"; exit 1; }
@@ -80,6 +91,7 @@ EOF
 
 if [[ "${KEEP_SOURCE:-0}" != "1" ]]; then
   if [[ -d "$DATA_DIR/Fixed" || -d "$DATA_DIR/Flaky" || -d "$DATA_DIR/Flakym2" || -d "$DATA_DIR/Flaky.pristine" || -d "$DATA_DIR/result" ]]; then
+    reclaim_owner
     echo "[step 0 ] Cleaning mutated source dirs from previous run"
     rm -rf "$DATA_DIR/Fixed" "$DATA_DIR/Flaky" "$DATA_DIR/Flakym2" \
            "$DATA_DIR/Flaky.pristine" "$DATA_DIR/result"
@@ -146,6 +158,7 @@ echo "[sanity ] Flaky run failed as expected (Tests=$TESTS Failures=$FAILURES Er
 
 mkdir -p "$STEPS_OUT_DIR"
 
+reclaim_owner
 echo "[step 9.5] snapshotting Flaky/ -> Flaky.pristine"
 rm -rf "$DATA_DIR/Flaky.pristine"
 cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Flaky.pristine"
@@ -191,6 +204,7 @@ if [[ "${KEEP_SOURCE:-0}" != "1" && -f "$ARCHIVED_MARKER" ]]; then
   ARCHIVED_TO="$(cat "$ARCHIVED_MARKER")"
   if [[ -d "$ARCHIVED_TO" ]]; then
     echo "[cleanup] archived to $ARCHIVED_TO - removing workspace $DATA_DIR"
+    reclaim_owner
     rm -rf "$DATA_DIR" || echo "[cleanup] WARNING: could not remove $DATA_DIR"
   else
     echo "[cleanup] archive dir missing ($ARCHIVED_TO) - keeping $DATA_DIR"
