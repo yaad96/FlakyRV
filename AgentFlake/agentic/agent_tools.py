@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPROFLAKE_DIR = SCRIPT_DIR.parent
 LLM_SCRIPTS_DIR = REPROFLAKE_DIR / "LLM Scripts"
 sys.path.insert(0, str(LLM_SCRIPTS_DIR))
+sys.path.insert(0, str(SCRIPT_DIR))
+import agentic_config  # type: ignore  # noqa: E402
 from assemble_llm_context import (  # type: ignore  # noqa: E402
     DATA_DIR,
     JAVA_SOURCE_DIRS,
@@ -70,7 +73,18 @@ def get_test_code(container: str, test_name: str | None = None) -> str:
 
     # Keep arbitrary test lookup in get_code; this tool is case-scoped.
     known = {n for n in (polluter_fqn, victim_fqn) if n}
-    if test_name and test_name.strip() and test_name.strip() not in known:
+    if agentic_config.prompt_variant() == "generic":
+        # Ablation: never echo the other role's FQN, and never use the words
+        # "victim"/"polluter" — both disclose the withheld category.
+        visible = {victim_fqn} if agentic_config.GENERIC_HIDE_POLLUTER else known
+        visible = {n for n in visible if n}
+        if test_name and test_name.strip() and test_name.strip() not in visible:
+            return (
+                f"(test_name '{test_name}' is not a test recorded for this "
+                f"container. Use get_code with the FQN if you want a different "
+                f"class/method.)"
+            )
+    elif test_name and test_name.strip() and test_name.strip() not in known:
         return (
             f"(test_name '{test_name}' is not the victim or polluter for this "
             f"container. Known names: {sorted(known) or 'none'}. Use get_code "
@@ -102,10 +116,20 @@ def get_test_code(container: str, test_name: str | None = None) -> str:
                 "FQN has no #methodName component"))
         pieces.append("")
 
-    if test_type == "od" and polluter_fqn:
-        _emit("POLLUTER", polluter_fqn)
-    if victim_fqn:
-        _emit("VICTIM", victim_fqn)
+    if agentic_config.prompt_variant() == "generic":
+        # Ablation: no POLLUTER/VICTIM role labels, because "this container has
+        # a polluter" already discloses the category. GENERIC_HIDE_POLLUTER
+        # additionally withholds the polluter's source.
+        if (test_type == "od" and polluter_fqn
+                and not agentic_config.GENERIC_HIDE_POLLUTER):
+            _emit("TEST", polluter_fqn)
+        if victim_fqn:
+            _emit("TEST UNDER REPAIR", victim_fqn)
+    else:
+        if test_type == "od" and polluter_fqn:
+            _emit("POLLUTER", polluter_fqn)
+        if victim_fqn:
+            _emit("VICTIM", victim_fqn)
 
     if not pieces:
         return f"(no test FQNs recorded for {container})"
@@ -474,6 +498,51 @@ TOOL_SCHEMAS = [
 ]
 
 
+
+# Tool descriptions that would themselves disclose the withheld category.
+_GENERIC_SCHEMA_OVERRIDES = {
+    "get_test_code": {
+        "description": (
+            "Return the source code for the flaky test in this container "
+            "(annotations + signature + body). Use this first to see what the "
+            "test is asserting and what helpers/lifecycle hooks exist."
+        ),
+        "test_name_description": (
+            "Optional. The test FQN to fetch (must be a test recorded for "
+            "this container). Omit to get all relevant tests for the case."
+        ),
+    },
+}
+
+# Tools withdrawn entirely in the "generic" ablation. get_flaky_example is
+# keyed by flakiness category, so offering it at all would reintroduce the
+# prior diagnosis the ablation is measuring the dependence on.
+_GENERIC_DROPPED_TOOLS = {"get_flaky_example"}
+
+
+def tool_schemas() -> list[dict]:
+    """Read-only tool schemas for the active prompt variant.
+
+    The "generic" ablation drops the category-keyed exemplar tool entirely and
+    rewrites the get_test_code description, which would otherwise advertise a
+    polluter and so leak the withheld category.
+    """
+    if agentic_config.prompt_variant() != "generic":
+        return copy.deepcopy(TOOL_SCHEMAS)
+
+    schemas = [copy.deepcopy(s) for s in TOOL_SCHEMAS
+               if s["name"] not in _GENERIC_DROPPED_TOOLS]
+    for schema in schemas:
+        override = _GENERIC_SCHEMA_OVERRIDES.get(schema["name"])
+        if not override:
+            continue
+        schema["description"] = override["description"]
+        props = schema["input_schema"]["properties"]
+        if schema["name"] == "get_test_code":
+            props["test_name"]["description"] = override["test_name_description"]
+    return schemas
+
+
 def dispatch_tool(container: str, name: str, arguments: dict) -> str:
     """Dispatch a read-only context-tool call by name. Returns a string
     payload suitable to hand back as the tool_result content block.
@@ -483,7 +552,13 @@ def dispatch_tool(container: str, name: str, arguments: dict) -> str:
     can continue rather than crash mid-iteration.
     """
     arguments = arguments or {}
+    offered = {s["name"] for s in tool_schemas()}
     try:
+        if name not in offered:
+            # Covers a name the model was never given. Says nothing about why
+            # it is absent, so the reply is identical to any other bad name.
+            available = ", ".join(sorted(offered) + ["submit_patch"])
+            return f"(unknown tool '{name}'. Available: {available}.)"
         if name == "get_test_code":
             return get_test_code(container, arguments.get("test_name"))
         if name == "get_code":
@@ -494,7 +569,7 @@ def dispatch_tool(container: str, name: str, arguments: dict) -> str:
         if name == "get_flaky_example":
             return get_flaky_example(
                 arguments.get("category"), container=container)
-        return (f"(unknown tool '{name}'. Available: get_test_code, get_code, "
-                f"get_error_logs, get_flaky_example, submit_patch.)")
+        available = ", ".join([s["name"] for s in tool_schemas()] + ["submit_patch"])
+        return f"(unknown tool '{name}'. Available: {available}.)"
     except Exception as exc:  # noqa: BLE001
         return f"(tool {name} raised {type(exc).__name__}: {exc})"

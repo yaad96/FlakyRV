@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,12 @@ VERIFY_PASS_RUNS             = agentic_config.VERIFY_PASS_RUNS
 
 SUPPORTED_TEST_TYPES = {"od", "td", "id", "nio", "unclassified", "unassigned", "brittle"}
 
-SYSTEM_PROMPT = prompts.SYSTEM_PROMPT.format(
+PROMPT_VARIANT = agentic_config.prompt_variant()
+
+SYSTEM_PROMPT = (
+    prompts.SYSTEM_PROMPT_GENERIC if PROMPT_VARIANT == "generic"
+    else prompts.SYSTEM_PROMPT
+).format(
     max_tool_turns=MAX_TOOL_TURNS_PER_ITERATION,
     max_context_tools=max(0, MAX_TOOL_TURNS_PER_ITERATION - 1),
 )
@@ -57,12 +63,28 @@ _PRETTY_TYPE = {
 
 def build_initial_user_prompt(container: str, row: dict,
                               failure_text: str) -> str:
-    """Render prompts.INITIAL_USER_TEMPLATE with the run-specific values."""
+    """Render the initial user prompt for the active variant.
+
+    "typed" (baseline) states the container's category and, for OD, the
+    polluter. "generic" (ablation) withholds both and lists every category
+    definition instead, so the agent diagnoses the category itself.
+    """
     test_type  = (row.get("test_type") or "").strip().lower()
     victim_fqn = (row.get("flaky_test") or "").strip()
     polluter   = (row.get("polluter/state setter") or "").strip()
     module     = (row.get("module") or ".").strip()
     java_ver   = (row.get("java") or "").strip()
+
+    if PROMPT_VARIANT == "generic":
+        return prompts.INITIAL_USER_TEMPLATE_GENERIC.format(
+            container    = container,
+            victim_fqn   = victim_fqn,
+            module       = module,
+            java_line    = f"Java:       {java_ver}\n" if java_ver else "",
+            test_code    = agent_tools.get_test_code(container).strip(),
+            failure_text = failure_text.strip() or "(no failure block was extracted)",
+            category_definitions = prompts.ALL_CATEGORY_DEFINITIONS.rstrip() + "\n",
+        ).rstrip() + "\n"
 
     return prompts.INITIAL_USER_TEMPLATE.format(
         container    = container,
@@ -203,7 +225,7 @@ SUBMIT_PATCH_SCHEMA = {
 def all_tool_schemas() -> list[dict]:
     """Anthropic-format tool schemas (context tools + submit_patch). The
     OpenAI backend translates these into function-calling format."""
-    return list(agent_tools.TOOL_SCHEMAS) + [SUBMIT_PATCH_SCHEMA]
+    return agent_tools.tool_schemas() + [SUBMIT_PATCH_SCHEMA]
 def write_llm_response_json(steps_dir: Path, container: str,
                             args_dict: dict, iteration: int,
                             model: str = "") -> Path:
@@ -507,7 +529,8 @@ def write_run_summary(path: Path, container: str, model: str,
             "category":       "N/A" if final_verdict == "PASSED" else "",
             "applied_ok":     f"{submit_attempts}/{max_iters}",
             "tools_sequence": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "tool_counts":    f"model={model} test_type={test_type}",
+            "tool_counts":    (f"model={model} test_type={test_type} "
+                               f"prompt_variant={PROMPT_VARIANT}"),
             "confirm_runs":   "",
             "elapsed_seconds": round(total_elapsed, 1),
             "tokens_in":      cumulative_usage.get("input_tokens", 0),
@@ -515,6 +538,147 @@ def write_run_summary(path: Path, container: str, model: str,
             "cache_read":     cumulative_usage.get("cache_read_input_tokens", 0),
             "test_integrity": test_integrity,
         })
+# Per-run archive. Layout matches run_agentic_pass_at_k.py so both writers
+# produce the same tree:
+#   data/AGENTIC_FULL_RUNS/<container>_runs/<model>/run_N/
+# Set AGENTFLAKE_SKIP_ARCHIVE=1 to skip (pass@k archives on its own), or
+# AGENTFLAKE_RUN_NUMBER=<n> to pin the run number instead of auto-incrementing.
+ARCHIVE_ROOT = Path(DATA_DIR) / "AGENTIC_FULL_RUNS"
+
+_ARCHIVE_DIRS_SKIPPING_TARGET = ("Fixed", "Flaky", "FlakyCodeChange")
+_ARCHIVE_DIRS = ("result", "traces-fixed", "traces-flaky", "traces-flakycc",
+                 "traces-pass", "traces-fail")
+_ARCHIVE_FILES = ("Fixed.patch", "FlakyCodeChange.patch",
+                  "FixedCodeChange.patch", "flaky_info.txt",
+                  "issue_description.txt")
+
+
+def _model_label(model: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", model) or "model"
+
+
+def next_run_dir(container: str, model: str) -> tuple[Path, int]:
+    """Return (per_run_dir, run_number) for the next archive of this container.
+
+    Honours AGENTFLAKE_RUN_NUMBER when set; otherwise takes the highest
+    existing run_N for this container+model and adds one, so earlier runs are
+    never overwritten.
+    """
+    model_root = ARCHIVE_ROOT / f"{container}_runs" / _model_label(model)
+
+    pinned = (os.environ.get("AGENTFLAKE_RUN_NUMBER") or "").strip()
+    if pinned.isdigit() and int(pinned) > 0:
+        run_n = int(pinned)
+    else:
+        used = []
+        if model_root.is_dir():
+            for entry in model_root.iterdir():
+                m = re.fullmatch(r"run_(\d+)", entry.name)
+                if m and entry.is_dir():
+                    used.append(int(m.group(1)))
+        run_n = (max(used) + 1) if used else 1
+
+    return model_root / f"run_{run_n}", run_n
+
+
+def archive_run(base: Path, per_run_dir: Path) -> bool:
+    """Copy this run's artefacts into per_run_dir.
+
+    Returns True only if everything was copied. Never raises: the caller uses
+    the return value to decide whether deleting the workspace is safe.
+    """
+    skip_target = shutil.ignore_patterns("target")
+    try:
+        per_run_dir.mkdir(parents=True, exist_ok=True)
+        for sub, ignore in ([(d, skip_target) for d in _ARCHIVE_DIRS_SKIPPING_TARGET]
+                            + [(d, None) for d in _ARCHIVE_DIRS]):
+            src = base / sub
+            if src.is_dir():
+                shutil.copytree(src, per_run_dir / sub, symlinks=True,
+                                ignore=ignore, dirs_exist_ok=True)
+        steps = base / "Steps_Output_Files"
+        if steps.is_dir():
+            shutil.copytree(steps, per_run_dir / "Steps_Output_Files",
+                            symlinks=True, dirs_exist_ok=True)
+        for name in _ARCHIVE_FILES:
+            src = base / name
+            if src.is_file():
+                shutil.copy2(src, per_run_dir / name)
+        print(f"[archive] saved run -> {per_run_dir}")
+        return True
+    except OSError as exc:
+        print(f"[archive] WARNING: could not archive to {per_run_dir}: {exc}")
+        return False
+
+
+# Cumulative across-runs summary, one row per completed run. Lives beside
+# .anthropic_api_key at the repo root, NOT under AgentFlake/.
+COMPLETE_SUMMARY_FILE = REPROFLAKE_DIR.parent / "Complete_Containers_Summary.csv"
+
+# Column names match run_agentic_pass_at_k.COMPLETE_SUMMARY_COLS where they
+# overlap, so rows from both writers stay comparable.
+COMPLETE_SUMMARY_COLS = [
+    "timestamp", "container", "test_type", "model", "prompt_variant",
+    "run", "final verdict", "iterations_used",
+    "input_tokens", "output_tokens", "total_tokens", "llm_seconds",
+    "validation_runs", "temperature", "tools_used",
+]
+
+
+def append_complete_summary(*, container: str, model: str, test_type: str,
+                            final_verdict: str, submit_attempts: int,
+                            total_elapsed: float, cumulative_usage: dict,
+                            iter_rows: list[dict], run_label: str) -> None:
+    """Append one row for this run to COMPLETE_SUMMARY_FILE.
+
+    Writes the header when the file is new or empty. Never raises: a failure
+    here must not lose an otherwise-good run, so problems are reported and
+    swallowed.
+    """
+    import csv as _csv
+    import datetime
+
+    tools_used: list[str] = []
+    for row in iter_rows:
+        tools_used.extend(row.get("tools_used", []))
+
+    tokens_in = cumulative_usage.get("input_tokens", 0)
+    tokens_out = cumulative_usage.get("output_tokens", 0)
+
+    record = {
+        "timestamp":       datetime.datetime.now(
+                               datetime.timezone.utc).isoformat(timespec="seconds"),
+        "container":       container,
+        "test_type":       test_type,
+        "model":           model,
+        "prompt_variant":  PROMPT_VARIANT,
+        "run":             run_label,
+        "final verdict":   final_verdict,
+        "iterations_used": submit_attempts,
+        "input_tokens":    tokens_in,
+        "output_tokens":   tokens_out,
+        "total_tokens":    tokens_in + tokens_out,
+        "llm_seconds":     round(total_elapsed, 1),
+        "validation_runs": VERIFY_PASS_RUNS,
+        "temperature":     TEMPERATURE,
+        "tools_used":      _tool_counts_str(tools_used),
+    }
+
+    try:
+        need_header = (not COMPLETE_SUMMARY_FILE.is_file()
+                       or COMPLETE_SUMMARY_FILE.stat().st_size == 0)
+        with open(COMPLETE_SUMMARY_FILE, "a", encoding="utf-8", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=COMPLETE_SUMMARY_COLS,
+                                quoting=_csv.QUOTE_ALL, extrasaction="ignore")
+            if need_header:
+                w.writeheader()
+            w.writerow(record)
+        print(f"[summary] appended run row -> {COMPLETE_SUMMARY_FILE}")
+    except OSError as exc:
+        print(f"[summary] WARNING: could not append to "
+              f"{COMPLETE_SUMMARY_FILE}: {exc}")
+
+
 class RunContext:
     """Bundle of resolved per-run values shared across backends."""
     __slots__ = ("row", "test_type", "docker_container", "base",
@@ -540,7 +704,6 @@ def prepare_run(args) -> RunContext:
     Exits (sys.exit) on an unknown container or unsupported test_type — the
     same contract both backends had inline.
     """
-    import re
 
     row = load_csv_row(args.container)
     if not row:
@@ -572,6 +735,15 @@ def prepare_run(args) -> RunContext:
     if not failure_text:
         print("[init ] WARNING: no failure block found in any traces-*/mvn.log; "
               "agent will see an empty failure log section.")
+
+    if PROMPT_VARIANT == "generic":
+        print("[init ] PROMPT VARIANT: generic (ABLATION) — category and "
+              "polluter withheld; all category definitions listed"
+              + ("" if agentic_config.GENERIC_HIDE_POLLUTER
+                 else "; polluter source still shown (role label removed)"))
+    else:
+        print("[init ] PROMPT VARIANT: typed (baseline) — category "
+              "disclosed; polluter disclosed for OD")
 
     initial_user = build_initial_user_prompt(args.container, row, failure_text)
     oos_reason = detect_out_of_scope_failure(row, source_base, failure_text)
@@ -724,6 +896,28 @@ def finalize_run(*, ctx: RunContext, container: str, model: str, provider: str,
         total_elapsed    = total_elapsed,
         cumulative_usage = cumulative_usage,
         test_integrity   = integrity_str,
+    )
+
+    # Archive before the next run's step 0 wipes Flaky/ and Steps_Output_Files.
+    per_run_dir, run_n = next_run_dir(container, model)
+    if (os.environ.get("AGENTFLAKE_SKIP_ARCHIVE") or "").strip() == "1":
+        print(f"[archive] skipped (AGENTFLAKE_SKIP_ARCHIVE=1); run_{run_n}")
+    elif archive_run(ctx.base, per_run_dir):
+        # Tell the shell script the archive is safely on disk, so it can drop
+        # the workspace once it has finished printing its summary from it.
+        (steps_dir / ".archived_to").write_text(
+            str(per_run_dir) + "\n", encoding="utf-8")
+
+    append_complete_summary(
+        container        = container,
+        model            = model,
+        test_type        = ctx.test_type,
+        final_verdict    = final_verdict,
+        submit_attempts  = submit_attempts,
+        total_elapsed    = total_elapsed,
+        cumulative_usage = cumulative_usage,
+        iter_rows        = iter_summary_rows,
+        run_label        = f"run_{run_n}",
     )
 
     print(f"\n[done ] verdict={final_verdict}  attempts={submit_attempts}  "

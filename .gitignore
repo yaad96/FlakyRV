@@ -24,3 +24,6 @@ __pycache__/
 
 # Claude Code session state — local-only, must not be committed
 .claude/
+
+# Anthropic API key — local only, must never be committed
+.anthropic_api_key

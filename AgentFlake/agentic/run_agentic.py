@@ -39,15 +39,14 @@ def resolve_model(alias: str) -> tuple[str, str]:
 
 
 def get_api_key(provider: str) -> tuple[str, str]:
-    """Return (api_key, source); environment variables take precedence."""
+    """Return (api_key, source).
+
+    Anthropic keys come only from .anthropic_api_key. OpenAI keys still fall
+    back to the environment then agentic_config.
+    """
     if provider == "anthropic":
-        env_val    = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        config_val = (agentic_config.ANTHROPIC_API_KEY or "").strip()
-        if env_val:
-            return env_val, "env"
-        if config_val:
-            return config_val, "config"
-        return "", ""
+        # File only — see agentic_config.anthropic_api_key().
+        return agentic_config.anthropic_api_key(), "file"
     if provider == "openai":
         env_val    = os.environ.get("OPENAI_API_KEY", "").strip()
         config_val = (agentic_config.OPENAI_API_KEY or "").strip()
@@ -117,10 +116,13 @@ def main() -> None:
 
         api_key, source = get_api_key(provider)
         if not api_key:
-            key_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+            if provider == "anthropic":
+                sys.exit(f"ERROR: No API key found for '{model_id}' "
+                         f"({provider}).\n       Paste it into "
+                         f"{agentic_config.ANTHROPIC_API_KEY_FILE}")
             sys.exit(f"ERROR: No API key found for '{model_id}' ({provider}).\n"
-                     f"       Set {key_var} in agentic_config.py or export it as "
-                     f"an environment variable.")
+                     f"       Set OPENAI_API_KEY in agentic_config.py or export "
+                     f"it as an environment variable.")
 
         resolved.append((alias, model_id, provider))
         key_display = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"

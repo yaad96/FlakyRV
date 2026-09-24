@@ -3,10 +3,11 @@ set -euo pipefail
 
 RESULT_CONTAINER="${1:?Usage: $0 <result_container>}"
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
-  echo "ERROR: no LLM API key is set. The agentic orchestrator requires one."
-  echo "       export ANTHROPIC_API_KEY=sk-ant-...   (for claude-* models)"
-  echo "       export OPENAI_API_KEY=sk-...          (for gpt-* models)"
+KEY_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/.anthropic_api_key"
+if [[ ! -s "$KEY_FILE" && -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "ERROR: no LLM API key is available. The agentic orchestrator requires one."
+  echo "       Paste your Anthropic key into $KEY_FILE   (for claude-* models)"
+  echo "       export OPENAI_API_KEY=sk-...                      (for gpt-* models)"
   exit 1
 fi
 
@@ -115,7 +116,8 @@ if (( need_step1 )); then
       mv "$DATA_DIR/$ZIP/"* "$DATA_DIR/" 2>/dev/null || true
       rmdir "$DATA_DIR/$ZIP" 2>/dev/null || true
     fi
-    rm -f "$ZIP_PATH"
+    # Keep the zip: step 0 wipes the extracted dirs each run, so the next
+    # run re-extracts a pristine copy from here instead of re-downloading.
   fi
 else
   echo "[step 1c] Flaky/, Flakym2/ already present — skipping unzip."
@@ -208,4 +210,18 @@ if [[ -f "$STEPS_OUT_DIR/verify_after_fix.verdict" ]]; then
 fi
 
 echo "=========================================="
+# The run is archived under data/AGENTIC_FULL_RUNS/, so the workspace is now
+# redundant scratch (Flakym2/ alone is ~150MB). Drop it once the summary above
+# has been printed. Only ever fires when the orchestrator confirmed the archive.
+ARCHIVED_MARKER="$STEPS_OUT_DIR/.archived_to"
+if [[ "${KEEP_SOURCE:-0}" != "1" && -f "$ARCHIVED_MARKER" ]]; then
+  ARCHIVED_TO="$(cat "$ARCHIVED_MARKER")"
+  if [[ -d "$ARCHIVED_TO" ]]; then
+    echo "[cleanup] archived to $ARCHIVED_TO - removing workspace $DATA_DIR"
+    rm -rf "$DATA_DIR" || echo "[cleanup] WARNING: could not remove $DATA_DIR"
+  else
+    echo "[cleanup] archive dir missing ($ARCHIVED_TO) - keeping $DATA_DIR"
+  fi
+fi
+
 exit $AGENT_RC

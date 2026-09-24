@@ -70,11 +70,9 @@ def _extract_assistant_blocks(response):
 def run(args: argparse.Namespace) -> None:
     ctx = common.prepare_run(args)
 
-    api_key = (os.environ.get("ANTHROPIC_API_KEY", "")
-               or getattr(agentic_config, "ANTHROPIC_API_KEY", "")).strip()
-    if not api_key:
-        sys.exit("ERROR: ANTHROPIC_API_KEY is not set.\n"
-                 "       Set it in agentic_config.py or export it as an env var.")
+    # Read the key from .anthropic_api_key only. No env-var or module fallback,
+    # so the key in use is always the one in that file.
+    api_key = agentic_config.anthropic_api_key()
 
     client = Anthropic(api_key=api_key)
     supports_temperature = (

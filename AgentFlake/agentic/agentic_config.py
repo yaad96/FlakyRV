@@ -1,7 +1,37 @@
 """Configuration defaults for AgentFlake's agentic repair runners."""
 
-ANTHROPIC_API_KEY: str = ""
 OPENAI_API_KEY: str = ""
+
+# The Anthropic key is read ONLY from this file — never from an environment
+# variable and never from a constant in this module. Paste the key into it as
+# the sole contents. It is git-ignored.
+ANTHROPIC_API_KEY_FILE = (
+    __import__("pathlib").Path(__file__).resolve().parent.parent.parent
+    / ".anthropic_api_key"
+)
+
+
+def anthropic_api_key() -> str:
+    """Return the Anthropic key read from ANTHROPIC_API_KEY_FILE.
+
+    Exits with a pointed message when the file is missing or empty, rather
+    than falling back to any other source.
+    """
+    path = ANTHROPIC_API_KEY_FILE
+    if not path.is_file():
+        raise SystemExit(
+            f"ERROR: Anthropic key file not found: {path}\n"
+            f"       Create it and paste your key in as the only contents:\n"
+            f"         printf %s \"sk-ant-...\" > {path}\n"
+            f"         chmod 600 {path}"
+        )
+    key = path.read_text(encoding="utf-8").strip()
+    if not key:
+        raise SystemExit(
+            f"ERROR: Anthropic key file is empty: {path}\n"
+            f"       Paste your key in as the only contents."
+        )
+    return key
 
 CLAUDE_MODELS: dict = {
     "claude":              "claude-sonnet-4-6",   # default alias
@@ -37,3 +67,36 @@ TEMPERATURE: float = 0
 
 # get_error_logs and exact-resource get_code calls bypass this cap.
 TOOL_OUTPUT_MAX_CHARS: int = 16_000
+
+# ---------------------------------------------------------------------------
+# Prompt ablation.
+#
+# "typed"   (default) — baseline: the prompt states this container's flakiness
+#                       category and, for OD, the polluter FQN.
+# "generic"           — ablation: category and polluter are withheld and every
+#                       category definition is listed instead, so the agent has
+#                       to diagnose the category itself.
+#
+# Set with AGENTFLAKE_PROMPT_VARIANT=generic. Reproduction and verification are
+# unaffected; only what the model is told changes.
+# ---------------------------------------------------------------------------
+
+PROMPT_VARIANTS = ("typed", "generic")
+
+# In the "generic" arm, also withhold the polluter test's source from
+# get_test_code. Set False to withhold only the category label and the
+# POLLUTER/VICTIM role labels while still showing both methods.
+GENERIC_HIDE_POLLUTER: bool = True
+
+
+def prompt_variant() -> str:
+    """Resolve the active prompt variant from the environment."""
+    import os
+
+    raw = (os.environ.get("AGENTFLAKE_PROMPT_VARIANT") or "typed").strip().lower()
+    if raw not in PROMPT_VARIANTS:
+        raise SystemExit(
+            f"ERROR: AGENTFLAKE_PROMPT_VARIANT={raw!r} is not one of "
+            f"{', '.join(PROMPT_VARIANTS)}"
+        )
+    return raw

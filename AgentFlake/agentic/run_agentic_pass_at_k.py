@@ -13,7 +13,6 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import agentic_config  # type: ignore  # noqa: E402
@@ -42,13 +41,6 @@ def _api_key_var(model_id: str) -> str:
 
 SENTINEL = ".run_complete"
 
-COMPLETE_SUMMARY_FILE = REPROFLAKE_DIR / "Complete_Containers_Summary.csv"
-COMPLETE_SUMMARY_COLS = [
-    "timestamp", "container", "test_type", "model", "run", "final verdict",
-    "rv_traces_used",
-    "input_tokens", "output_tokens", "total_tokens", "llm_seconds",
-    "validation_runs", "temperature", "tools_used",
-]
 def load_csv_row(container):
     with open(CSV_FILE, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -328,82 +320,7 @@ def collect_all_rows_on_disk(runs_root: Path, container: str,
     return rows
 
 
-_first_append_this_process = True
 
-
-def append_complete_summary(rows):
-    """Append per-run rows to the shared Complete Containers Summary.csv.
-    Tagged with rv_traces_used='agentic' so the agentic rows are visually
-    and machine-distinguishable from the non-agentic pass@k batches.
-    """
-    global _first_append_this_process
-    if not rows:
-        return
-    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    new_row_dicts = []
-    for r in rows:
-        new_row_dicts.append({
-            "timestamp": timestamp,
-            "container": r["container"],
-            "test_type": r["test_type"],
-            "model": r["model"],
-            "run": f"run_{r['run']}",
-            "final verdict": r["verdict"],
-            "rv_traces_used": "agentic",
-            "input_tokens": r["input_tokens_total"],
-            "output_tokens": r["output_tokens_total"],
-            "total_tokens": r["total_tokens"],
-            "llm_seconds": round(r["elapsed_llm_seconds"], 1),
-            "validation_runs": agentic_config.VERIFY_PASS_RUNS,
-            "temperature": agentic_config.TEMPERATURE,
-            "tools_used": r.get("tools_used", ""),
-        })
-
-    if _first_append_this_process:
-        _first_append_this_process = False
-        existing_header = None
-        if COMPLETE_SUMMARY_FILE.is_file() and COMPLETE_SUMMARY_FILE.stat().st_size > 0:
-            with open(COMPLETE_SUMMARY_FILE, encoding="utf-8", newline="") as f:
-                try:
-                    existing_header = next(csv.reader(f))
-                except StopIteration:
-                    existing_header = None
-        if existing_header == COMPLETE_SUMMARY_COLS:
-            with open(COMPLETE_SUMMARY_FILE, "a", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=COMPLETE_SUMMARY_COLS,
-                                   quoting=csv.QUOTE_ALL, extrasaction="ignore")
-                for r in new_row_dicts:
-                    w.writerow(r)
-        else:
-            # Header drift / new file path: full rewrite. DictReader skips
-            # blank lines, so any pre-existing blank separator rows are dropped
-            # here and none are written back.
-            existing_rows = []
-            if COMPLETE_SUMMARY_FILE.is_file():
-                with open(COMPLETE_SUMMARY_FILE, encoding="utf-8", newline="") as f:
-                    existing_rows = list(csv.DictReader(f))
-            for r in existing_rows:
-                if "verdict" in r and "final verdict" not in r:
-                    r["final verdict"] = r.pop("verdict")
-            tmp = COMPLETE_SUMMARY_FILE.with_suffix(
-                COMPLETE_SUMMARY_FILE.suffix + ".tmp")
-            with open(tmp, "w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=COMPLETE_SUMMARY_COLS,
-                                   quoting=csv.QUOTE_ALL, extrasaction="ignore")
-                w.writeheader()
-                for r in existing_rows:
-                    w.writerow(r)
-                for r in new_row_dicts:
-                    w.writerow(r)
-            tmp.replace(COMPLETE_SUMMARY_FILE)
-    else:
-        with open(COMPLETE_SUMMARY_FILE, "a", encoding="utf-8", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=COMPLETE_SUMMARY_COLS,
-                               quoting=csv.QUOTE_ALL, extrasaction="ignore")
-            for r in new_row_dicts:
-                w.writerow(r)
-    print(f"[wrapper] appended {len(rows)} row(s) to "
-          f"{COMPLETE_SUMMARY_FILE.name}")
 
 
 def write_summary(rows, runs_root: Path, container, row_meta, runs_per_model,
@@ -475,6 +392,10 @@ def main():
         env["AGENTIC_MAX_ITERATIONS"] = str(args.max_iterations)
         env["AGENTIC_MODEL"] = args.model
         env["PYTHONUNBUFFERED"] = "1"
+        # This wrapper archives each run itself (archive_run below), and it owns
+        # the run numbering, so tell the orchestrator not to do either.
+        env["AGENTFLAKE_SKIP_ARCHIVE"] = "1"
+        env["AGENTFLAKE_RUN_NUMBER"] = str(run_n)
 
         with open(pipeline_log, "w", encoding="utf-8") as logf:
             p = subprocess.Popen(
@@ -515,7 +436,6 @@ def main():
         all_rows = collect_all_rows_on_disk(runs_root, args.container,
                                             test_type)
         write_summary(all_rows, runs_root, args.container, row, args.runs)
-        append_complete_summary([row_data])
 
     all_rows = collect_all_rows_on_disk(runs_root, args.container, test_type)
     if all_rows:
