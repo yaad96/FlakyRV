@@ -584,7 +584,18 @@ def extract_class_header(file_path, include_inner_classes=False, max_lines=400):
         if i < n:
             body, new_i = _process_class_body(lines, i, 1, depths, include_inner_classes)
             out.append(body)
-            i = new_i
+            if new_i <= i:
+                # No progress. _process_class_body only advances while
+                # depths[i] >= scope_depth, so it returns start_idx untouched
+                # when the computed depth is negative — which happens if the
+                # brace counter under-runs on a '}' the string/comment stripper
+                # failed to mask. Emit the line and step over it: without this
+                # the outer loop spins on the same index forever, pegging a
+                # core until the process is killed.
+                out.append(lines[i])
+                i += 1
+            else:
+                i = new_i
 
     text = "".join(out)
     text_lines = text.splitlines(keepends=True)
