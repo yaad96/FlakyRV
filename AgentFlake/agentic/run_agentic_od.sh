@@ -177,11 +177,11 @@ reclaim_owner
 echo "[step 9.5] snapshotting Flaky/ -> Flaky.pristine"
 rm -rf "$DATA_DIR/Flaky.pristine"
 cp -r "$DATA_DIR/Flaky" "$DATA_DIR/Flaky.pristine"
-echo "[agent ] launching agentic_orchestrator.py (max_iterations=${AGENTIC_MAX_ITERATIONS:-10})"
+echo "[agent ] launching agentic_orchestrator.py (max_iterations=${AGENTIC_MAX_ITERATIONS:-agentic_config.MAX_ITERATIONS})"
 set +e
 python3 "$SCRIPT_DIR/agentic_orchestrator.py" "$RESULT_CONTAINER" \
   --docker-container "$CONTAINER" \
-  --max-iterations "${AGENTIC_MAX_ITERATIONS:-10}" \
+  ${AGENTIC_MAX_ITERATIONS:+--max-iterations "$AGENTIC_MAX_ITERATIONS"} \
   ${AGENTIC_MODEL:+--model "$AGENTIC_MODEL"}
 AGENT_RC=$?
 set -e
