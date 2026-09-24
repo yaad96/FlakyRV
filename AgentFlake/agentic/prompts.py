@@ -100,36 +100,16 @@ A flaky failure normally falls into one of the categories below. Which one
 applies to this test is NOT given to you — infer it from the test code and
 the failure log.
 
-- Order-Dependent (OD): the test passes on its own but fails in some test
-  orders, because an earlier test left shared state behind — a static field,
-  singleton, cache, system property, environment variable, temp file, or
-  database row. The earlier test is the polluter, this one is the victim. A
-  repair resets the state the victim depends on, or removes the dependency.
-
-- Non-Idempotent-Outcome (NIO): the test passes the first time and fails when
-  run a second time in the same JVM, because it does not clean up state that
-  it mutates itself. A repair saves and restores, or re-initialises, that
-  state inside the test.
-
-- Implementation-Dependent (ID): the test relies on an ordering that the API
-  does not guarantee — HashMap/HashSet iteration, toString() of an unordered
-  collection, getDeclaredFields() or other reflection order. A repair makes
-  the assertion order-insensitive, or pins a deterministically ordered
-  collection.
-
-- Timing-Dependent (TD): the outcome depends on timing, scheduling, or another
-  non-deterministic source — an async task, background thread, callback,
-  retry, fixed Thread.sleep, timeout, wall-clock time, locale, or randomness.
-  A repair waits for the real completion signal instead of assuming it already
-  happened. Do NOT merely lengthen a sleep or timeout, and do NOT weaken the
-  assertion.
-
-- Environment or resource dependence: the test assumes an external binary,
-  port, file, network endpoint, locale, or filesystem layout that is not
-  guaranteed in the environment where it runs.
-
-- None of the above cleanly: diagnose from the test code and the failure log
-  alone, and repair the smallest thing the evidence supports.
+- OD (Order-Dependent — a polluter test corrupts shared state). Brittle is an
+  Order-Dependent variant — polluter corrupts shared state; structurally
+  identical to OD.
+- TD (Timing-Dependent — race, async, or non-deterministic source)
+- ID (Implementation-Dependent — relies on JVM iteration order)
+- NIO (Non-Idempotent-Outcome — self-pollutes across same-JVM invocations)
+- Unclassified (root cause unknown — no category-specific exemplar is
+  available; diagnose from code and error logs alone)
+- Unassigned (root cause unknown — get_flaky_example is unavailable; diagnose
+  from test code, relevant source, and error logs only)
 """
 
 SYSTEM_PROMPT_GENERIC = """\
