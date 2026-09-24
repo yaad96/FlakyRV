@@ -482,7 +482,8 @@ def _tool_counts_str(tools: list[str]) -> str:
 _RUN_SUMMARY_COLS = [
     "iteration", "verdict", "category", "applied_ok",
     "tools_sequence", "tool_counts", "confirm_runs",
-    "elapsed_seconds", "tokens_in", "tokens_out", "cache_read",
+    "elapsed_seconds", "tokens_in", "tokens_out",
+    "cache_read_tokens", "cache_write_tokens",
     "test_integrity",
 ]
 
@@ -521,7 +522,8 @@ def write_run_summary(path: Path, container: str, model: str,
                 "elapsed_seconds": round(row.get("elapsed_seconds", 0.0), 1),
                 "tokens_in":      row.get("tokens_in", 0),
                 "tokens_out":     row.get("tokens_out", 0),
-                "cache_read":     row.get("cache_read", 0),
+                "cache_read_tokens":  row.get("cache_read_tokens", 0),
+                "cache_write_tokens": row.get("cache_write_tokens", 0),
             })
         w.writerow({
             "iteration":      "SUMMARY",
@@ -535,7 +537,8 @@ def write_run_summary(path: Path, container: str, model: str,
             "elapsed_seconds": round(total_elapsed, 1),
             "tokens_in":      cumulative_usage.get("input_tokens", 0),
             "tokens_out":     cumulative_usage.get("output_tokens", 0),
-            "cache_read":     cumulative_usage.get("cache_read_input_tokens", 0),
+            "cache_read_tokens":  cumulative_usage.get("cache_read_input_tokens", 0),
+            "cache_write_tokens": cumulative_usage.get("cache_creation_input_tokens", 0),
             "test_integrity": test_integrity,
         })
 # Per-run archive. Layout matches run_agentic_pass_at_k.py so both writers
@@ -620,8 +623,13 @@ COMPLETE_SUMMARY_FILE = REPROFLAKE_DIR.parent / "Complete_Containers_Summary.csv
 COMPLETE_SUMMARY_COLS = [
     "timestamp", "container", "test_type", "model", "prompt_variant",
     "run", "final verdict", "iterations_used",
-    "input_tokens", "output_tokens", "total_tokens", "llm_seconds",
-    "validation_runs", "temperature", "tools_used",
+    # Token columns are disjoint and sum to total_tokens. uncached_input_tokens
+    # is input that was NOT served from cache; the two cache columns are billed
+    # at different rates (writes above base, reads far below), so they are kept
+    # apart rather than folded into one input figure.
+    "uncached_input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens", "total_tokens",
+    "llm_seconds", "validation_runs", "temperature", "tools_used",
 ]
 
 
@@ -644,6 +652,8 @@ def append_complete_summary(*, container: str, model: str, test_type: str,
 
     tokens_in = cumulative_usage.get("input_tokens", 0)
     tokens_out = cumulative_usage.get("output_tokens", 0)
+    cache_read = cumulative_usage.get("cache_read_input_tokens", 0)
+    cache_write = cumulative_usage.get("cache_creation_input_tokens", 0)
 
     record = {
         "timestamp":       datetime.datetime.now(
@@ -655,9 +665,13 @@ def append_complete_summary(*, container: str, model: str, test_type: str,
         "run":             run_label,
         "final verdict":   final_verdict,
         "iterations_used": submit_attempts,
-        "input_tokens":    tokens_in,
+        "uncached_input_tokens": tokens_in,
         "output_tokens":   tokens_out,
-        "total_tokens":    tokens_in + tokens_out,
+        "cache_read_tokens":  cache_read,
+        "cache_write_tokens": cache_write,
+        # Each backend's _usage_dict owns this figure, because the providers
+        # bucket cached input differently; do not recompute it here.
+        "total_tokens":    cumulative_usage.get("total_tokens", 0),
         "llm_seconds":     round(total_elapsed, 1),
         "validation_runs": VERIFY_PASS_RUNS,
         "temperature":     TEMPERATURE,
@@ -667,6 +681,21 @@ def append_complete_summary(*, container: str, model: str, test_type: str,
     try:
         need_header = (not COMPLETE_SUMMARY_FILE.is_file()
                        or COMPLETE_SUMMARY_FILE.stat().st_size == 0)
+        if not need_header:
+            # A file written before the cache columns existed has a narrower
+            # header; appending to it would misalign every new row. Retire it
+            # alongside and start a fresh file rather than corrupt the old data.
+            with open(COMPLETE_SUMMARY_FILE, encoding="utf-8", newline="") as f:
+                existing = next(_csv.reader(f), [])
+            if existing != COMPLETE_SUMMARY_COLS:
+                retired = COMPLETE_SUMMARY_FILE.with_name(
+                    COMPLETE_SUMMARY_FILE.stem + ".pre_cache"
+                    + COMPLETE_SUMMARY_FILE.suffix)
+                COMPLETE_SUMMARY_FILE.rename(retired)
+                print(f"[summary] column set changed - retired old summary to "
+                      f"{retired.name}, starting a fresh "
+                      f"{COMPLETE_SUMMARY_FILE.name}")
+                need_header = True
         with open(COMPLETE_SUMMARY_FILE, "a", encoding="utf-8", newline="") as f:
             w = _csv.DictWriter(f, fieldnames=COMPLETE_SUMMARY_COLS,
                                 quoting=_csv.QUOTE_ALL, extrasaction="ignore")

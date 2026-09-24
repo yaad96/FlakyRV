@@ -44,7 +44,13 @@ def _usage_dict(response) -> dict:
     return {
         "input_tokens": u.input_tokens,
         "output_tokens": u.output_tokens,
-        "total_tokens": u.input_tokens + u.output_tokens,
+        # Anthropic reports the three input buckets as DISJOINT: input_tokens
+        # is the uncached remainder, and the two cache figures are billed on
+        # top of it. Summing all four is therefore the real billed total -
+        # leaving the cache ones out under-reports a cached run by ~90%.
+        "total_tokens": (u.input_tokens + u.output_tokens
+                         + (getattr(u, "cache_read_input_tokens", 0) or 0)
+                         + (getattr(u, "cache_creation_input_tokens", 0) or 0)),
         "cache_read_input_tokens":
             getattr(u, "cache_read_input_tokens", 0) or 0,
         "cache_creation_input_tokens":
@@ -67,6 +73,49 @@ def _extract_assistant_blocks(response):
                 "input": block.input,
             })
     return out
+
+
+# --- prompt caching -------------------------------------------------------
+# The loop resends the whole conversation on every tool turn, so input is
+# ~96% of token spend. Anthropic caches by prefix (render order: tools ->
+# system -> messages), but only at an explicit cache_control breakpoint, so
+# without the markers below nothing is ever reused and every turn re-reads
+# the full history at full price.
+
+SYSTEM_PROMPT_CACHED = [{
+    "type": "text",
+    "text": SYSTEM_PROMPT,
+    "cache_control": {"type": "ephemeral"},
+}]
+
+
+def _with_breakpoint(msg: dict) -> dict:
+    """Copy of `msg` whose final content block carries a cache breakpoint."""
+    content = msg["content"]
+    blocks = ([{"type": "text", "text": content}]
+              if isinstance(content, str) else list(content))
+    if not blocks:
+        return msg
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return {**msg, "content": blocks}
+
+
+def _cached_messages(messages: list[dict], rolling: int = 2) -> list[dict]:
+    """`messages` with rolling cache breakpoints on the newest turns.
+
+    Two breakpoints (plus the one on `system`) stay inside Anthropic's cap of
+    four and let a turn still read the previous turn's entry when the newest
+    block is not yet warm. The originals are left untouched so the archived
+    conversation stays free of cache metadata.
+    """
+    if not messages:
+        return messages
+    out = list(messages)
+    for i in range(max(0, len(out) - rolling), len(out)):
+        out[i] = _with_breakpoint(out[i])
+    return out
+
+
 def run(args: argparse.Namespace) -> None:
     ctx = common.prepare_run(args)
 
@@ -105,7 +154,6 @@ def run(args: argparse.Namespace) -> None:
         submitted_this_iter = False
         tools_used_this_iter: list[str] = []
 
-        submit_only_tools = [t for t in tools if t["name"] == "submit_patch"]
         max_context_tools = max(0, MAX_TOOL_TURNS_PER_ITERATION - 1)
         while tool_turn < MAX_TOOL_TURNS_PER_ITERATION:
             tool_turn += 1
@@ -117,9 +165,13 @@ def run(args: argparse.Namespace) -> None:
             create_kwargs = {
                 "model": args.model,
                 "max_tokens": MAX_TOKENS,
-                "system": SYSTEM_PROMPT,
-                "tools": submit_only_tools if force_submit else tools,
-                "messages": messages,
+                "system": SYSTEM_PROMPT_CACHED,
+                # Tools render first in the cache prefix, so the list must stay
+                # byte-identical across turns; tool_choice below is what forces
+                # the submit, and narrowing `tools` too would invalidate the
+                # whole prefix on the longest turn of the iteration.
+                "tools": tools,
+                "messages": _cached_messages(messages),
             }
             if supports_temperature:
                 create_kwargs["temperature"] = TEMPERATURE
@@ -256,7 +308,8 @@ def run(args: argparse.Namespace) -> None:
                 "confirm_runs": confirm_runs,
                 "tokens_in":  iter_delta.get("input_tokens", 0),
                 "tokens_out": iter_delta.get("output_tokens", 0),
-                "cache_read": iter_delta.get("cache_read_input_tokens", 0),
+                "cache_read_tokens":  iter_delta.get("cache_read_input_tokens", 0),
+                "cache_write_tokens": iter_delta.get("cache_creation_input_tokens", 0),
                 "max_iters":  MAX_ITERATIONS,
             }
             with open(ctx.iter_log_path, "a", encoding="utf-8") as fh:
