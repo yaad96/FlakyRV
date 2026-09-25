@@ -150,6 +150,18 @@ docker exec "$CONTAINER" bash -c "
   mvn dependency:properties surefire:test \
     -pl $MODULE -Dtest='$VICTIM' \
     $MVNOPTS 2>&1 | tee /app/work/traces-flakycc/mvn.log || true
+  # Unversioned dependency:properties resolves maven-dependency-plugin from the
+  # project's own pluginManagement. APEX pins 2.1, which predates the
+  # 'properties' goal (added in 2.2), so Maven aborts before Surefire runs and
+  # no summary is written. Retry with a fully-qualified plugin coordinate, which
+  # bypasses the project's pin. Kept as a fallback rather than pinning outright
+  # so containers that already pass keep running the exact same command.
+  if grep -q 'Could not find goal .properties.' /app/work/traces-flakycc/mvn.log; then
+    echo '[step 4d] dependency:properties unavailable at the project-pinned version; retrying with maven-dependency-plugin:3.1.1'
+    mvn org.apache.maven.plugins:maven-dependency-plugin:3.1.1:properties surefire:test \
+      -pl $MODULE -Dtest='$VICTIM' \
+      $MVNOPTS 2>&1 | tee /app/work/traces-flakycc/mvn.log || true
+  fi
 "
 
 echo "[sanity ] Verifying FlakyCodeChange produced a test failure"
